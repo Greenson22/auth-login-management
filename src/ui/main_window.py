@@ -373,8 +373,8 @@ class MainWindow(QMainWindow):
     confirm = QMessageBox.question(
         self,
         "Konfirmasi Update File",
-        f"Apakah Anda yakin ingin menimpa isi file:\n<b>{target_file}</b>\n\ndengan"
-        f" data akun dari database untuk <b>{email}</b>?",
+        f"Apakah Anda yakin ingin <b>MENIMPA TOTAL</b> isi"
+        f" file:\n<b>{target_file}</b>\n\ndengan data akun <b>{email}</b>?",
         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         QMessageBox.StandardButton.No,
     )
@@ -388,50 +388,17 @@ class MainWindow(QMainWindow):
         return
 
       try:
+        # Timpa langsung seluruh isi file target dengan JSON dari DB
         new_data = json.loads(raw_json_str)
 
-        # Coba baca isi file existing
-        existing_data = {}
-        if os.path.exists(target_file):
-          try:
-            with open(target_file, "r", encoding="utf-8") as f:
-              existing_data = json.load(f)
-          except Exception:
-            existing_data = {}
-
-        # Jika file lokal valid dan punya array 'accounts'
-        if (
-            isinstance(existing_data, dict)
-            and "accounts" in existing_data
-            and isinstance(existing_data["accounts"], list)
-        ):
-          accounts_list = existing_data["accounts"]
-          new_acc_obj = new_data["accounts"][0]
-
-          # Cari apakah akun sudah ada di file
-          found_index = -1
-          for idx, acc in enumerate(accounts_list):
-            if isinstance(acc, dict) and acc.get("id") == account_id:
-              found_index = idx
-              break
-
-          if found_index >= 0:
-            accounts_list[found_index] = new_acc_obj
-          else:
-            accounts_list.append(new_acc_obj)
-
-          output_data = existing_data
-        else:
-          output_data = new_data
-
         with open(target_file, "w", encoding="utf-8") as f:
-          json.dump(output_data, f, indent=2)
+          json.dump(new_data, f, indent=2)
 
         QMessageBox.information(
             self,
             "Berhasil",
-            f"File <b>antigravity-accounts.json</b> berhasil diperbarui dengan"
-            f" akun:\n{email}",
+            f"File <b>antigravity-accounts.json</b> berhasil ditimpa total"
+            f" dengan akun:\n{email}",
         )
       except Exception as e:
         QMessageBox.critical(
