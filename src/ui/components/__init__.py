@@ -3,6 +3,7 @@ from .json_input import JsonInputWidget
 from .account_table import AccountTableWidget
 from .settings_dialog import SettingsDialog
 from .loading_dialog import LoadingDialog, WorkerThread
+from .secure_line_edit import SecureLineEdit
 
 __all__ = [
     "ConfigBarWidget",
@@ -11,4 +12,5 @@ __all__ = [
     "SettingsDialog",
     "LoadingDialog",
     "WorkerThread",
+    "SecureLineEdit",
 ]

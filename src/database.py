@@ -313,6 +313,47 @@ class AccountDatabase:
         conn.commit()
       return inserted_count
 
+  def decrypt_all_accounts(self, password: str) -> int:
+    """Mendekripsi semua akun yang tersimpan terenkripsi (is_encrypted=1) dan menyimpannya kembali sebagai plaintext.
+
+    Digunakan sebelum mengganti password enkripsi agar data lama dapat dibaca ulang.
+    Mengembalikan jumlah akun yang berhasil didekripsi.
+    """
+    if not password:
+      raise ValueError("Password enkripsi tidak boleh kosong.")
+
+    # Ambil semua akun yang terenkripsi
+    query_ids = "SELECT id FROM accounts WHERE is_encrypted = 1"
+
+    if self.use_turso and self.turso_client:
+      id_rows, _ = self.turso_client.execute(query_ids)
+      account_ids = [r[0] for r in id_rows] if id_rows else []
+    else:
+      with self.get_connection() as conn:
+        cursor = conn.cursor()
+        account_ids = [r[0] for r in cursor.execute(query_ids).fetchall()]
+
+    if not account_ids:
+      return 0
+
+    count = 0
+    for acc_id in account_ids:
+      try:
+        # Rekonstruksi JSON menggunakan password yang ada
+        json_str = self.reconstruct_json_by_id(acc_id, password=password)
+        if not json_str:
+          continue
+        # Simpan ulang sebagai plaintext (encrypt=False)
+        self.insert_or_update_json(json_str, encrypt=False, password="")
+        count += 1
+      except Exception as e:
+        raise ValueError(
+            f"Gagal mendekripsi akun '{acc_id}': {e}\n\n"
+            "Pastikan password yang dimasukkan benar."
+        ) from e
+
+    return count
+
   def delete_account(self, account_id: str) -> bool:
     """Menghapus akun berdasarkan ID dari database."""
     if self.use_turso and self.turso_client:
