@@ -1,52 +1,76 @@
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QPushButton, QTableWidget, QTableWidgetItem, QLabel,
     QHeaderView, QMessageBox, QSplitter, QFileDialog, QLineEdit, QMenu
 )
 from PyQt6.QtCore import Qt, QSettings
+from PyQt6.QtGui import QColor, QBrush
 from src.database import AccountDatabase
 
 
-def format_quota_info(remaining_fraction, reset_time):
+def parse_quota_info(remaining_fraction, reset_time):
     """
-    Mengformat persentase kuota dan tanggal reset time.
-    Contoh output: "100% (-)" atau "50% (04 Nov 2026, 12:30)"
+    Mengembalikan tuple: (formatted_text, is_reset_passed, color_hex)
+    - text: Format "100% (04 Nov 2026, 12:30)"
+    - is_reset_passed: True jika waktu reset sudah tercapai/berlalu
+    - color_hex: Warna teks persentase (Hijau/Kuning/Merah)
     """
-    # 1. Format Persentase Quota
-    if remaining_fraction is None:
-        percentage_str = "-"
-    else:
+    # 1. Hitung Persentase & Warna Teks Persentase
+    percent_val = None
+    if remaining_fraction is not None:
         try:
-            percent = int(float(remaining_fraction) * 100)
-            percentage_str = f"{percent}%"
+            percent_val = float(remaining_fraction) * 100
+            percentage_str = f"{int(percent_val)}%"
         except (ValueError, TypeError):
             percentage_str = "-"
-
-    # 2. Format Reset Time
-    if not reset_time or reset_time == "-":
-        formatted_time = "-"
     else:
+        percentage_str = "-"
+
+    # Tentukan warna teks berdasarkan persentase
+    if percent_val is None:
+        text_color = "#888888"  # Abu-abu
+    elif percent_val >= 70:
+        text_color = "#2e7d32"  # Hijau
+    elif percent_val >= 30:
+        text_color = "#f57c00"  # Oranye/Kuning
+    else:
+        text_color = "#c62828"  # Merah
+
+    # 2. Cek Reset Time
+    formatted_time = "-"
+    is_reset_passed = False
+
+    if reset_time and reset_time != "-":
         try:
             if str(reset_time).isdigit() or isinstance(reset_time, (int, float)):
                 ts = float(reset_time)
                 if ts > 1e11:  # Milidetik
                     ts /= 1000.0
-                dt = datetime.fromtimestamp(ts)
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
             else:
                 clean_str = reset_time.replace("Z", "+00:00")
                 dt = datetime.fromisoformat(clean_str)
-                
-            formatted_time = dt.strftime("%d %b %Y, %H:%M")
+
+            # Ubah ke datetime lokal
+            dt_local = dt.astimezone()
+            formatted_time = dt_local.strftime("%d %b %Y, %H:%M")
+
+            # Pengecekan apakah waktu reset sudah lewat dari waktu saat ini
+            now = datetime.now(dt.tzinfo or timezone.utc)
+            if dt <= now:
+                is_reset_passed = True
         except Exception:
             formatted_time = str(reset_time)
 
     if percentage_str == "-" and formatted_time == "-":
-        return "-"
-    
-    return f"{percentage_str} ({formatted_time})"
+        display_text = "-"
+    else:
+        display_text = f"{percentage_str} ({formatted_time})"
+
+    return display_text, is_reset_passed, text_color
 
 
 class MainWindow(QMainWindow):
@@ -174,7 +198,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Database Error", f"Terjadi kesalahan:\n\n{str(e)}")
 
     def load_table_data(self):
-        """Memuat daftar akun ke dalam tabel."""
+        """Memuat daftar akun ke dalam tabel dengan pewarnaan visual."""
         rows = self.db.fetch_accounts_summary()
         self.table.setRowCount(0)
 
@@ -182,19 +206,41 @@ class MainWindow(QMainWindow):
             acc_id, email, flash_reset, flash_frac, pro_reset, pro_frac, claude_reset, claude_frac = row_data
             self.table.insertRow(row_idx)
 
+            # Parse masing-masing model
+            txt_flash, is_passed_flash, color_flash = parse_quota_info(flash_frac, flash_reset)
+            txt_pro, is_passed_pro, color_pro = parse_quota_info(pro_frac, pro_reset)
+            txt_claude, is_passed_claude, color_claude = parse_quota_info(claude_frac, claude_reset)
+
+            # Cek apakah ada salah satu model yang sudah ter-reset
+            row_has_reset = is_passed_flash or is_passed_pro or is_passed_claude
+
+            # Set items
             item_email = QTableWidgetItem(email or "-")
-            # Simpan account_id di UserRole item email agar bisa diambil saat klik kanan
             item_email.setData(Qt.ItemDataRole.UserRole, acc_id)
+            
+            item_flash = QTableWidgetItem(txt_flash)
+            item_flash.setForeground(QBrush(QColor(color_flash)))
 
-            self.table.setItem(row_idx, 0, item_email)
-            self.table.setItem(row_idx, 1, QTableWidgetItem(format_quota_info(flash_frac, flash_reset)))
-            self.table.setItem(row_idx, 2, QTableWidgetItem(format_quota_info(pro_frac, pro_reset)))
-            self.table.setItem(row_idx, 3, QTableWidgetItem(format_quota_info(claude_frac, claude_reset)))
+            item_pro = QTableWidgetItem(txt_pro)
+            item_pro.setForeground(QBrush(QColor(color_pro)))
 
-            for c in range(4):
-                item = self.table.item(row_idx, c)
-                if item:
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item_claude = QTableWidgetItem(txt_claude)
+            item_claude.setForeground(QBrush(QColor(color_claude)))
+
+            items = [item_email, item_flash, item_pro, item_claude]
+
+            for c, item in enumerate(items):
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                
+                # Jika waktu reset sudah tercapai, buat latar belakang baris berwarna merah muda mencolok
+                if row_has_reset:
+                    item.setBackground(QBrush(QColor("#ffcdd2")))  # Merah muda mencolok
+                    # Tebalkan font untuk penanda visual ekstra
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                    
+                self.table.setItem(row_idx, c, item)
 
     def show_context_menu(self, pos):
         """Menampilkan menu konteks saat pengguna klik kanan pada baris tabel."""
@@ -211,7 +257,6 @@ class MainWindow(QMainWindow):
         action_update_file = menu.addAction("🔄 Update ke antigravity-accounts.json")
         action_update_db = menu.addAction("📥 Update Database dari antigravity-accounts.json")
 
-        # Eksekusi menu
         chosen_action = menu.exec(self.table.viewport().mapToGlobal(pos))
         if chosen_action == action_copy:
             self.copy_account_json(account_id)
@@ -221,7 +266,6 @@ class MainWindow(QMainWindow):
             self.update_db_from_antigravity(account_id, email)
 
     def copy_account_json(self, account_id):
-        """Merekonstruksi JSON asli dari database lalu menyalinnya ke Clipboard."""
         json_str = self.db.reconstruct_json_by_id(account_id)
         if json_str:
             QApplication.clipboard().setText(json_str)
@@ -230,30 +274,18 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Gagal", "Gagal mengembalikan format JSON dari database.")
 
     def update_antigravity_file(self, account_id, email):
-        """Memperbarui file antigravity-accounts.json di folder config yang dipilih."""
         folder_path = self.txt_folder_path.text().strip()
 
-        # Peringatan 1: Folder belum dipilih
         if not folder_path or not os.path.exists(folder_path):
-            QMessageBox.warning(
-                self, 
-                "Folder Tidak Valid", 
-                "Silakan pilih folder OpenCode Config terlebih dahulu pada bagian atas!"
-            )
+            QMessageBox.warning(self, "Folder Tidak Valid", "Silakan pilih folder OpenCode Config terlebih dahulu!")
             return
 
         target_file = os.path.join(folder_path, "antigravity-accounts.json")
 
-        # Peringatan 2: File target tidak ditemukan
         if not os.path.exists(target_file):
-            QMessageBox.warning(
-                self,
-                "File Tidak Ditemukan",
-                f"File target <b>antigravity-accounts.json</b> tidak ditemukan di folder:\n{folder_path}"
-            )
+            QMessageBox.warning(self, "File Tidak Ditemukan", f"File target <b>antigravity-accounts.json</b> tidak ditemukan di folder:\n{folder_path}")
             return
 
-        # Konfirmasi Pengguna
         confirm = QMessageBox.question(
             self,
             "Konfirmasi Update File",
@@ -271,39 +303,23 @@ class MainWindow(QMainWindow):
             try:
                 with open(target_file, "w", encoding="utf-8") as f:
                     f.write(json_str)
-                QMessageBox.information(
-                    self,
-                    "Berhasil",
-                    f"File <b>antigravity-accounts.json</b> berhasil diperbarui dengan akun:\n{email}"
-                )
+                QMessageBox.information(self, "Berhasil", f"File <b>antigravity-accounts.json</b> berhasil diperbarui dengan akun:\n{email}")
             except Exception as e:
                 QMessageBox.critical(self, "Gagal Menulis File", f"Terjadi kesalahan saat menulis file:\n\n{str(e)}")
 
     def update_db_from_antigravity(self, account_id, email):
-        """Membaca isi antigravity-accounts.json dan memperbarui data akun terpilih di database."""
         folder_path = self.txt_folder_path.text().strip()
 
-        # Peringatan 1: Folder belum dipilih
         if not folder_path or not os.path.exists(folder_path):
-            QMessageBox.warning(
-                self,
-                "Folder Tidak Valid",
-                "Silakan pilih folder OpenCode Config terlebih dahulu pada bagian atas!"
-            )
+            QMessageBox.warning(self, "Folder Tidak Valid", "Silakan pilih folder OpenCode Config terlebih dahulu!")
             return
 
         target_file = os.path.join(folder_path, "antigravity-accounts.json")
 
-        # Peringatan 2: File tidak ditemukan
         if not os.path.exists(target_file):
-            QMessageBox.warning(
-                self,
-                "File Tidak Ditemukan",
-                f"File <b>antigravity-accounts.json</b> tidak ditemukan di folder:\n{folder_path}"
-            )
+            QMessageBox.warning(self, "File Tidak Ditemukan", f"File <b>antigravity-accounts.json</b> tidak ditemukan di folder:\n{folder_path}")
             return
 
-        # Read & Parse File JSON
         try:
             with open(target_file, "r", encoding="utf-8") as f:
                 content = f.read().strip()
@@ -318,7 +334,6 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Gagal Membaca File", f"Gagal membaca file:\n\n{str(e)}")
             return
 
-        # Ambil ID Akun dari file JSON (bisa berupa object atau array)
         file_acc = file_data.get("accounts", [file_data])[0] if isinstance(file_data, dict) and "accounts" in file_data else file_data
         if isinstance(file_acc, list) and len(file_acc) > 0:
             file_acc = file_acc[0]
@@ -326,7 +341,6 @@ class MainWindow(QMainWindow):
         file_acc_id = file_acc.get("id") if isinstance(file_acc, dict) else None
         file_acc_email = file_acc.get("email", "Tidak Diketahui") if isinstance(file_acc, dict) else "Tidak Diketahui"
 
-        # Peringatan 3: Apabila ID di file berbeda dengan baris yang dipilih
         mismatch_warning = ""
         if file_acc_id and file_acc_id != account_id:
             mismatch_warning = (
@@ -334,7 +348,6 @@ class MainWindow(QMainWindow):
                 f"ID Akun di file (<b>{file_acc_email}</b>) BERBEDA dengan baris yang dipilih di tabel (<b>{email}</b>)!"
             )
 
-        # Konfirmasi Pengguna
         confirm = QMessageBox.question(
             self,
             "Konfirmasi Update Database",
@@ -345,13 +358,8 @@ class MainWindow(QMainWindow):
 
         if confirm == QMessageBox.StandardButton.Yes:
             try:
-                # Masukkan/Update data dari file JSON ke SQLite Database
                 count = self.db.insert_or_update_json(content)
-                QMessageBox.information(
-                    self,
-                    "Berhasil Update Database",
-                    "Berhasil mengonfirmasi & memperbarui data akun ke database!"
-                )
+                QMessageBox.information(self, "Berhasil Update Database", "Berhasil mengonfirmasi & memperbarui data akun ke database!")
                 self.load_table_data()
             except Exception as e:
                 QMessageBox.critical(self, "Database Error", f"Terjadi kesalahan saat memperbarui database:\n\n{str(e)}")
