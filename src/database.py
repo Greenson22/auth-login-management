@@ -1,7 +1,7 @@
 import json
 import sqlite3
 from typing import Optional
-from src.crypto import decrypt_aes256, encrypt_aes256
+from src.crypto import decrypt_aes256, encrypt_aes256, decrypt_value, encrypt_value
 from src.turso_client import TursoClient
 
 
@@ -45,6 +45,7 @@ class AccountDatabase:
             added_at INTEGER,
             last_used INTEGER,
             cached_quota_updated_at INTEGER,
+            rate_limit_reset_times TEXT,
             is_encrypted INTEGER NOT NULL DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
@@ -84,9 +85,13 @@ class AccountDatabase:
             (create_fingerprints_sql, None),
             (create_quotas_sql, None),
         ])
-        # Migrasi kolom is_encrypted bila tabel sudah ada sebelumnya
+        # Migrasi kolom is_encrypted & rate_limit_reset_times bila tabel sudah ada sebelumnya
         try:
           self.turso_client.execute("ALTER TABLE accounts ADD COLUMN is_encrypted INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+          pass
+        try:
+          self.turso_client.execute("ALTER TABLE accounts ADD COLUMN rate_limit_reset_times TEXT")
         except Exception:
           pass
       except Exception:
@@ -98,20 +103,124 @@ class AccountDatabase:
         cursor.execute(create_accounts_sql)
         cursor.execute(create_fingerprints_sql)
         cursor.execute(create_quotas_sql)
-        # Migrasi kolom is_encrypted untuk SQLite lokal
+        # Migrasi kolom accounts untuk SQLite lokal
         cursor.execute("PRAGMA table_info(accounts);")
         columns = [row[1] for row in cursor.fetchall()]
         if "is_encrypted" not in columns:
           cursor.execute("ALTER TABLE accounts ADD COLUMN is_encrypted INTEGER NOT NULL DEFAULT 0;")
+        if "rate_limit_reset_times" not in columns:
+          cursor.execute("ALTER TABLE accounts ADD COLUMN rate_limit_reset_times TEXT;")
         conn.commit()
+
+  def _prepare_account_record(self, acc: dict, encrypt: bool, password: str):
+    """Menyiapkan data akun, fingerprint, dan quota untuk disimpan (terenkripsi atau plaintext)."""
+    acc_id = acc.get("id")
+    email = acc.get("email")
+    if not acc_id or not email:
+      return None
+
+    is_enc = bool(encrypt and password)
+    is_encrypted_val = 1 if is_enc else 0
+
+    if is_enc:
+      stored_rt = encrypt_value(acc.get("refreshToken", ""), password)
+      stored_project_id = encrypt_value(acc.get("projectId"), password)
+      stored_managed_project_id = encrypt_value(acc.get("managedProjectId"), password)
+      stored_enabled = encrypt_value(acc.get("enabled", True), password)
+      stored_verification_required = encrypt_value(acc.get("verificationRequired", False), password)
+      stored_added_at = encrypt_value(acc.get("addedAt"), password)
+      stored_last_used = encrypt_value(acc.get("lastUsed"), password)
+      stored_cached_quota_updated_at = encrypt_value(acc.get("cachedQuotaUpdatedAt"), password)
+      stored_rate_limit_reset_times = encrypt_value(acc.get("rateLimitResetTimes", {}), password)
+    else:
+      stored_rt = acc.get("refreshToken", "")
+      stored_project_id = acc.get("projectId")
+      stored_managed_project_id = acc.get("managedProjectId")
+      stored_enabled = 1 if acc.get("enabled", True) else 0
+      stored_verification_required = 1 if acc.get("verificationRequired", False) else 0
+      stored_added_at = acc.get("addedAt")
+      stored_last_used = acc.get("lastUsed")
+      stored_cached_quota_updated_at = acc.get("cachedQuotaUpdatedAt")
+      stored_rate_limit_reset_times = json.dumps(acc.get("rateLimitResetTimes", {}))
+
+    args_acc = [
+        acc_id,
+        email,
+        stored_rt,
+        stored_project_id,
+        stored_managed_project_id,
+        stored_enabled,
+        stored_verification_required,
+        stored_added_at,
+        stored_last_used,
+        stored_cached_quota_updated_at,
+        stored_rate_limit_reset_times,
+        is_encrypted_val,
+    ]
+
+    fp = acc.get("fingerprint", {}) or {}
+    cm = fp.get("clientMetadata", {}) or {}
+
+    if is_enc:
+      stored_dev_id = encrypt_value(fp.get("deviceId", ""), password)
+      stored_st = encrypt_value(fp.get("sessionToken", ""), password)
+      stored_user_agent = encrypt_value(fp.get("userAgent", ""), password)
+      stored_api_client = encrypt_value(fp.get("apiClient", ""), password)
+      stored_ide_type = encrypt_value(cm.get("ideType", ""), password)
+      stored_platform = encrypt_value(cm.get("platform", ""), password)
+      stored_plugin_type = encrypt_value(cm.get("pluginType", ""), password)
+      stored_fp_created_at = encrypt_value(fp.get("createdAt"), password)
+    else:
+      stored_dev_id = fp.get("deviceId")
+      stored_st = fp.get("sessionToken", "")
+      stored_user_agent = fp.get("userAgent")
+      stored_api_client = fp.get("apiClient")
+      stored_ide_type = cm.get("ideType")
+      stored_platform = cm.get("platform")
+      stored_plugin_type = cm.get("pluginType")
+      stored_fp_created_at = fp.get("createdAt")
+
+    args_fp = [
+        acc_id,
+        stored_dev_id,
+        stored_st,
+        stored_user_agent,
+        stored_api_client,
+        stored_ide_type,
+        stored_platform,
+        stored_plugin_type,
+        stored_fp_created_at,
+    ]
+
+    quotas = acc.get("cachedQuota", {}) or {}
+    args_quotas = []
+    for model_name, q in quotas.items():
+      # Note: model_name, remainingFraction, resetTime tetap plaintext untuk summary & sorting UI
+      if is_enc:
+        stored_remaining_reset = encrypt_value(q.get("remainingFractionResetTime"), password)
+        stored_model_count = encrypt_value(q.get("modelCount", 1), password)
+      else:
+        stored_remaining_reset = q.get("remainingFractionResetTime")
+        stored_model_count = q.get("modelCount", 1)
+
+      args_quotas.append([
+          acc_id,
+          model_name,
+          q.get("remainingFraction", 1.0),
+          q.get("resetTime"),
+          stored_remaining_reset,
+          stored_model_count,
+      ])
+
+    return args_acc, args_fp, args_quotas
 
   def insert_or_update_json(
       self, raw_json_str: str, encrypt: bool = False, password: str = ""
   ) -> int:
     """Parsing JSON dan menyimpannya ke database (Local SQLite atau Turso).
 
-    Jika encrypt=True dan password diberikan, refreshToken dan sessionToken
-    akan dienkripsi dengan AES-256 dan ditandai is_encrypted=1.
+    Jika encrypt=True dan password diberikan, semua field kredensial & metadata
+    (selain id, email, dan kuota ringkas untuk UI) akan dienkripsi dengan AES-256.
     """
     data = json.loads(raw_json_str)
     accounts = (
@@ -122,107 +231,65 @@ class AccountDatabase:
     if isinstance(accounts, dict):
       accounts = [accounts]
 
+    sql_acc = """
+        INSERT INTO accounts (
+            id, email, refresh_token, project_id, managed_project_id,
+            enabled, verification_required, added_at, last_used, cached_quota_updated_at,
+            rate_limit_reset_times, is_encrypted
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            email=excluded.email,
+            refresh_token=excluded.refresh_token,
+            project_id=excluded.project_id,
+            managed_project_id=excluded.managed_project_id,
+            enabled=excluded.enabled,
+            verification_required=excluded.verification_required,
+            added_at=excluded.added_at,
+            last_used=excluded.last_used,
+            cached_quota_updated_at=excluded.cached_quota_updated_at,
+            rate_limit_reset_times=excluded.rate_limit_reset_times,
+            is_encrypted=excluded.is_encrypted
+    """
+    sql_fp = """
+        INSERT INTO account_fingerprints (
+            account_id, device_id, session_token, user_agent,
+            api_client, ide_type, platform, plugin_type, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(account_id) DO UPDATE SET
+            device_id=excluded.device_id,
+            session_token=excluded.session_token,
+            user_agent=excluded.user_agent,
+            api_client=excluded.api_client,
+            ide_type=excluded.ide_type,
+            platform=excluded.platform,
+            plugin_type=excluded.plugin_type,
+            created_at=excluded.created_at
+    """
+    sql_q = """
+        INSERT INTO account_quotas (
+            account_id, model_name, remaining_fraction, reset_time,
+            remaining_fraction_reset_time, model_count
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(account_id, model_name) DO UPDATE SET
+            remaining_fraction=excluded.remaining_fraction,
+            reset_time=excluded.reset_time,
+            remaining_fraction_reset_time=excluded.remaining_fraction_reset_time,
+            model_count=excluded.model_count
+    """
+
     inserted_count = 0
-    is_encrypted_val = 1 if (encrypt and password) else 0
 
     if self.use_turso and self.turso_client:
       pipeline_stmts = []
       for acc in accounts:
-        if "id" not in acc or "email" not in acc:
+        prepared = self._prepare_account_record(acc, encrypt, password)
+        if not prepared:
           continue
-        acc_id = acc.get("id")
-        raw_rt = acc.get("refreshToken", "")
-        stored_rt = (
-            encrypt_aes256(raw_rt, password)
-            if is_encrypted_val and raw_rt
-            else raw_rt
-        )
-
-        sql_acc = """
-            INSERT INTO accounts (
-                id, email, refresh_token, project_id, managed_project_id,
-                enabled, verification_required, added_at, last_used, cached_quota_updated_at,
-                is_encrypted
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                email=excluded.email,
-                refresh_token=excluded.refresh_token,
-                enabled=excluded.enabled,
-                last_used=excluded.last_used,
-                cached_quota_updated_at=excluded.cached_quota_updated_at,
-                is_encrypted=excluded.is_encrypted
-        """
-        args_acc = [
-            acc_id,
-            acc.get("email"),
-            stored_rt,
-            acc.get("projectId"),
-            acc.get("managedProjectId"),
-            1 if acc.get("enabled", True) else 0,
-            1 if acc.get("verificationRequired", False) else 0,
-            acc.get("addedAt"),
-            acc.get("lastUsed"),
-            acc.get("cachedQuotaUpdatedAt"),
-            is_encrypted_val,
-        ]
+        args_acc, args_fp, list_args_quotas = prepared
         pipeline_stmts.append((sql_acc, args_acc))
-
-        fp = acc.get("fingerprint", {})
-        cm = fp.get("clientMetadata", {})
-        raw_st = fp.get("sessionToken", "")
-        stored_st = (
-            encrypt_aes256(raw_st, password)
-            if is_encrypted_val and raw_st
-            else raw_st
-        )
-
-        sql_fp = """
-            INSERT INTO account_fingerprints (
-                account_id, device_id, session_token, user_agent,
-                api_client, ide_type, platform, plugin_type, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(account_id) DO UPDATE SET
-                device_id=excluded.device_id,
-                session_token=excluded.session_token,
-                user_agent=excluded.user_agent,
-                api_client=excluded.api_client
-        """
-        args_fp = [
-            acc_id,
-            fp.get("deviceId"),
-            stored_st,
-            fp.get("userAgent"),
-            fp.get("apiClient"),
-            cm.get("ideType"),
-            cm.get("platform"),
-            cm.get("pluginType"),
-            fp.get("createdAt"),
-        ]
         pipeline_stmts.append((sql_fp, args_fp))
-
-        quotas = acc.get("cachedQuota", {})
-        for model_name, q in quotas.items():
-          sql_q = """
-              INSERT INTO account_quotas (
-                  account_id, model_name, remaining_fraction, reset_time,
-                  remaining_fraction_reset_time, model_count
-              ) VALUES (?, ?, ?, ?, ?, ?)
-              ON CONFLICT(account_id, model_name) DO UPDATE SET
-                  remaining_fraction=excluded.remaining_fraction,
-                  reset_time=excluded.reset_time,
-                  remaining_fraction_reset_time=excluded.remaining_fraction_reset_time,
-                  model_count=excluded.model_count
-          """
-          args_q = [
-              acc_id,
-              model_name,
-              q.get("remainingFraction", 1.0),
-              q.get("resetTime"),
-              q.get("remainingFractionResetTime"),
-              q.get("modelCount", 1),
-          ]
+        for args_q in list_args_quotas:
           pipeline_stmts.append((sql_q, args_q))
-
         inserted_count += 1
 
       if pipeline_stmts:
@@ -234,101 +301,14 @@ class AccountDatabase:
       with self.get_connection() as conn:
         cursor = conn.cursor()
         for acc in accounts:
-          if "id" not in acc or "email" not in acc:
+          prepared = self._prepare_account_record(acc, encrypt, password)
+          if not prepared:
             continue
-          acc_id = acc.get("id")
-          raw_rt = acc.get("refreshToken", "")
-          stored_rt = (
-              encrypt_aes256(raw_rt, password)
-              if is_encrypted_val and raw_rt
-              else raw_rt
-          )
-
-          cursor.execute(
-              """
-              INSERT INTO accounts (
-                  id, email, refresh_token, project_id, managed_project_id,
-                  enabled, verification_required, added_at, last_used, cached_quota_updated_at,
-                  is_encrypted
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT(id) DO UPDATE SET
-                  email=excluded.email,
-                  refresh_token=excluded.refresh_token,
-                  enabled=excluded.enabled,
-                  last_used=excluded.last_used,
-                  cached_quota_updated_at=excluded.cached_quota_updated_at,
-                  is_encrypted=excluded.is_encrypted
-              """,
-              (
-                  acc_id,
-                  acc.get("email"),
-                  stored_rt,
-                  acc.get("projectId"),
-                  acc.get("managedProjectId"),
-                  1 if acc.get("enabled", True) else 0,
-                  1 if acc.get("verificationRequired", False) else 0,
-                  acc.get("addedAt"),
-                  acc.get("lastUsed"),
-                  acc.get("cachedQuotaUpdatedAt"),
-                  is_encrypted_val,
-              ),
-          )
-          fp = acc.get("fingerprint", {})
-          cm = fp.get("clientMetadata", {})
-          raw_st = fp.get("sessionToken", "")
-          stored_st = (
-              encrypt_aes256(raw_st, password)
-              if is_encrypted_val and raw_st
-              else raw_st
-          )
-
-          cursor.execute(
-              """
-              INSERT INTO account_fingerprints (
-                  account_id, device_id, session_token, user_agent,
-                  api_client, ide_type, platform, plugin_type, created_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT(account_id) DO UPDATE SET
-                  device_id=excluded.device_id,
-                  session_token=excluded.session_token,
-                  user_agent=excluded.user_agent,
-                  api_client=excluded.api_client
-              """,
-              (
-                  acc_id,
-                  fp.get("deviceId"),
-                  stored_st,
-                  fp.get("userAgent"),
-                  fp.get("apiClient"),
-                  cm.get("ideType"),
-                  cm.get("platform"),
-                  cm.get("pluginType"),
-                  fp.get("createdAt"),
-              ),
-          )
-          quotas = acc.get("cachedQuota", {})
-          for model_name, q in quotas.items():
-            cursor.execute(
-                """
-                INSERT INTO account_quotas (
-                    account_id, model_name, remaining_fraction, reset_time,
-                    remaining_fraction_reset_time, model_count
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(account_id, model_name) DO UPDATE SET
-                    remaining_fraction=excluded.remaining_fraction,
-                    reset_time=excluded.reset_time,
-                    remaining_fraction_reset_time=excluded.remaining_fraction_reset_time,
-                    model_count=excluded.model_count
-                """,
-                (
-                    acc_id,
-                    model_name,
-                    q.get("remainingFraction", 1.0),
-                    q.get("resetTime"),
-                    q.get("remainingFractionResetTime"),
-                    q.get("modelCount", 1),
-                ),
-            )
+          args_acc, args_fp, list_args_quotas = prepared
+          cursor.execute(sql_acc, args_acc)
+          cursor.execute(sql_fp, args_fp)
+          for args_q in list_args_quotas:
+            cursor.execute(sql_q, args_q)
           inserted_count += 1
         conn.commit()
       return inserted_count
@@ -385,13 +365,13 @@ class AccountDatabase:
   def reconstruct_json_by_id(self, account_id: str, password: str = ""):
     """Membuka kembali data dari SQLite / Turso dan mengembalikannya ke format JSON utuh.
 
-    Jika akun tersimpan dalam kondisi terenkripsi (is_encrypted == 1), data token
-    akan didekripsi menggunakan password.
+    Jika akun tersimpan dalam kondisi terenkripsi (is_encrypted == 1), seluruh data
+    yang dienkripsi akan didekripsi menggunakan password.
     """
     query_acc = """
         SELECT id, refresh_token, project_id, email, enabled, added_at,
                 last_used, verification_required, managed_project_id, cached_quota_updated_at,
-                is_encrypted
+                is_encrypted, rate_limit_reset_times
         FROM accounts WHERE id = ?
     """
     query_fp = """
@@ -423,18 +403,7 @@ class AccountDatabase:
         fp_row = cursor.execute(query_fp, (account_id,)).fetchone()
         quota_rows = cursor.execute(query_quotas, (account_id,)).fetchall()
 
-    cached_quota = {}
-    for q in quota_rows:
-      cached_quota[q[0]] = {
-          "remainingFraction": q[1],
-          "resetTime": q[2],
-          "remainingFractionResetTime": q[3],
-          "modelCount": q[4],
-      }
-
     is_encrypted = bool(acc_row[10]) if len(acc_row) > 10 and acc_row[10] else False
-    raw_rt = acc_row[1] or ""
-    raw_st = fp_row[1] if fp_row and fp_row[1] else ""
 
     if is_encrypted:
       if not password:
@@ -442,42 +411,121 @@ class AccountDatabase:
             "Akun ini terenkripsi. Silakan atur/masukkan password enkripsi di Menu Pengaturan."
         )
       try:
-        final_refresh_token = decrypt_aes256(raw_rt, password) if raw_rt else ""
-        final_session_token = decrypt_aes256(raw_st, password) if raw_st else ""
+        final_refresh_token = decrypt_value(acc_row[1], password, "", strict=True)
+        final_project_id = decrypt_value(acc_row[2], password, None, strict=True)
+        final_enabled = decrypt_value(acc_row[4], password, True, strict=True)
+        final_added_at = decrypt_value(acc_row[5], password, None, strict=True)
+        final_last_used = decrypt_value(acc_row[6], password, None, strict=True)
+        final_verification_required = decrypt_value(acc_row[7], password, False, strict=True)
+        final_managed_project_id = decrypt_value(acc_row[8], password, None, strict=True)
+        final_cached_quota_updated_at = decrypt_value(acc_row[9], password, None, strict=True)
+        raw_rate_limit = acc_row[11] if len(acc_row) > 11 else None
+        final_rate_limit_reset_times = decrypt_value(raw_rate_limit, password, {}, strict=True) or {}
+
+        if fp_row:
+          final_device_id = decrypt_value(fp_row[0], password, "", strict=True)
+          final_session_token = decrypt_value(fp_row[1], password, "", strict=True)
+          final_user_agent = decrypt_value(fp_row[2], password, "", strict=True)
+          final_api_client = decrypt_value(fp_row[3], password, "", strict=True)
+          final_ide_type = decrypt_value(fp_row[4], password, "", strict=True)
+          final_platform = decrypt_value(fp_row[5], password, "", strict=True)
+          final_plugin_type = decrypt_value(fp_row[6], password, "", strict=True)
+          final_fp_created_at = decrypt_value(fp_row[7], password, 0, strict=True)
+        else:
+          final_device_id = ""
+          final_session_token = ""
+          final_user_agent = ""
+          final_api_client = ""
+          final_ide_type = ""
+          final_platform = ""
+          final_plugin_type = ""
+          final_fp_created_at = 0
       except Exception as e:
         raise ValueError(
             f"Gagal mendekripsi akun (password mungkin salah atau data korup): {e}"
         )
     else:
-      final_refresh_token = raw_rt
-      final_session_token = raw_st
+      final_refresh_token = acc_row[1] or ""
+      final_project_id = acc_row[2]
+      final_enabled = bool(acc_row[4])
+      final_added_at = acc_row[5]
+      final_last_used = acc_row[6]
+      final_verification_required = bool(acc_row[7])
+      final_managed_project_id = acc_row[8]
+      final_cached_quota_updated_at = acc_row[9]
+      raw_rate_limit = acc_row[11] if len(acc_row) > 11 else None
+      if isinstance(raw_rate_limit, str) and raw_rate_limit:
+        try:
+          final_rate_limit_reset_times = json.loads(raw_rate_limit)
+        except Exception:
+          final_rate_limit_reset_times = {}
+      else:
+        final_rate_limit_reset_times = raw_rate_limit or {}
+
+      if fp_row:
+        final_device_id = fp_row[0] or ""
+        final_session_token = fp_row[1] or ""
+        final_user_agent = fp_row[2] or ""
+        final_api_client = fp_row[3] or ""
+        final_ide_type = fp_row[4] or ""
+        final_platform = fp_row[5] or ""
+        final_plugin_type = fp_row[6] or ""
+        final_fp_created_at = fp_row[7] or 0
+      else:
+        final_device_id = ""
+        final_session_token = ""
+        final_user_agent = ""
+        final_api_client = ""
+        final_ide_type = ""
+        final_platform = ""
+        final_plugin_type = ""
+        final_fp_created_at = 0
+
+    cached_quota = {}
+    for q in quota_rows:
+      model_name = q[0]
+      rem_frac = q[1]
+      res_time = q[2]
+      if is_encrypted:
+        rem_frac_res_time = decrypt_value(q[3], password, q[3], strict=True)
+        model_count = decrypt_value(q[4], password, q[4] or 1, strict=True)
+      else:
+        rem_frac_res_time = q[3]
+        model_count = q[4] or 1
+
+      cached_quota[model_name] = {
+          "remainingFraction": rem_frac,
+          "resetTime": res_time,
+          "remainingFractionResetTime": rem_frac_res_time,
+          "modelCount": model_count,
+      }
 
     account_json = {
         "id": acc_row[0],
         "refreshToken": final_refresh_token,
-        "projectId": acc_row[2],
+        "projectId": final_project_id,
         "email": acc_row[3],
-        "enabled": bool(acc_row[4]),
-        "addedAt": acc_row[5],
-        "lastUsed": acc_row[6],
-        "verificationRequired": bool(acc_row[7]),
-        "managedProjectId": acc_row[8],
-        "rateLimitResetTimes": {},
+        "enabled": bool(final_enabled),
+        "addedAt": final_added_at,
+        "lastUsed": final_last_used,
+        "verificationRequired": bool(final_verification_required),
+        "managedProjectId": final_managed_project_id,
+        "rateLimitResetTimes": final_rate_limit_reset_times if isinstance(final_rate_limit_reset_times, dict) else {},
         "fingerprint": {
-            "deviceId": fp_row[0] if fp_row else "",
+            "deviceId": final_device_id,
             "sessionToken": final_session_token,
-            "userAgent": fp_row[2] if fp_row else "",
-            "apiClient": fp_row[3] if fp_row else "",
+            "userAgent": final_user_agent,
+            "apiClient": final_api_client,
             "clientMetadata": {
-                "ideType": fp_row[4] if fp_row else "",
-                "platform": fp_row[5] if fp_row else "",
-                "pluginType": fp_row[6] if fp_row else "",
+                "ideType": final_ide_type,
+                "platform": final_platform,
+                "pluginType": final_plugin_type,
             },
-            "createdAt": fp_row[7] if fp_row else 0,
+            "createdAt": final_fp_created_at,
         },
         "fingerprintHistory": [],
         "cachedQuota": cached_quota,
-        "cachedQuotaUpdatedAt": acc_row[9],
+        "cachedQuotaUpdatedAt": final_cached_quota_updated_at,
     }
 
     full_config = {

@@ -72,3 +72,40 @@ def decrypt_aes256(encrypted_base64: str, password: str) -> str:
   plaintext = unpadder.update(padded_plaintext) + unpadder.finalize()
 
   return plaintext.decode("utf-8")
+
+
+def encrypt_value(val, password: str) -> str:
+  """Mengonversi nilai (str, int, float, bool, dict, list) ke JSON string lalu dienkripsi dengan AES-256."""
+  if val is None or val == "":
+    return ""
+  import json
+  plaintext = json.dumps(val, ensure_ascii=False)
+  return encrypt_aes256(plaintext, password)
+
+
+def decrypt_value(encrypted_val: str, password: str, fallback_raw=None, strict: bool = False):
+  """Mendekripsi ciphertext AES-256 lalu mengembalikannya ke tipe data aslinya (int, bool, dict, str, dll).
+
+  Jika strict=True, exception akan diteruskan (tidak ditangkap) sehingga caller dapat mendeteksi
+  kegagalan dekripsi akibat password salah atau data korup.
+  """
+  if not encrypted_val:
+    return fallback_raw
+  import json
+  if strict:
+    decrypted_str = decrypt_aes256(encrypted_val, password)
+    try:
+      return json.loads(decrypted_str)
+    except Exception:
+      return decrypted_str
+  else:
+    try:
+      decrypted_str = decrypt_aes256(encrypted_val, password)
+      try:
+        return json.loads(decrypted_str)
+      except Exception:
+        return decrypted_str
+    except Exception:
+      # Jika gagal dekripsi (misal data lama yang masih plaintext), kembalikan raw
+      return encrypted_val if fallback_raw is None else fallback_raw
+
