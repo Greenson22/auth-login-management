@@ -1,5 +1,6 @@
 import json
 import os
+
 from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import (
@@ -21,6 +22,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
 from src.database import AccountDatabase
 from src.ui.utils import parse_quota_info
 
@@ -47,6 +49,7 @@ class MainWindow(QMainWindow):
     # BAGIAN ATAS: FOLDER CONFIG & CONTROL BAR
     # ------------------------------------------
     config_layout = QHBoxLayout()
+
     label_folder = QLabel("<b>Folder OpenCode Config:</b>")
     self.txt_folder_path = QLineEdit()
     self.txt_folder_path.setReadOnly(True)
@@ -59,6 +62,7 @@ class MainWindow(QMainWindow):
     config_layout.addWidget(label_folder)
     config_layout.addWidget(self.txt_folder_path)
     config_layout.addWidget(btn_browse)
+
     main_layout.addLayout(config_layout)
 
     # Splitter untuk Input JSON dan Tabel
@@ -139,7 +143,6 @@ class MainWindow(QMainWindow):
     )
     self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
     self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-
     self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     self.table.customContextMenuRequested.connect(self.show_context_menu)
 
@@ -167,6 +170,7 @@ class MainWindow(QMainWindow):
     saved_folder = self.settings.value("opencode_folder", "")
     if saved_folder:
       self.txt_folder_path.setText(saved_folder)
+
     saved_sort = self.settings.value("sort_mode_index", 0, type=int)
     if 0 <= saved_sort < self.cmb_sort_mode.count():
       self.cmb_sort_mode.setCurrentIndex(saved_sort)
@@ -182,6 +186,7 @@ class MainWindow(QMainWindow):
     if not raw_text:
       QMessageBox.warning(self, "Peringatan", "Area teks JSON masih kosong!")
       return
+
     try:
       count = self.db.insert_or_update_json(raw_text)
       QMessageBox.information(
@@ -280,6 +285,7 @@ class MainWindow(QMainWindow):
     self.table.setRowCount(0)
     for row_idx, item_data in enumerate(parsed_list):
       self.table.insertRow(row_idx)
+
       p_flash = item_data["flash"]
       p_pro = item_data["pro"]
       p_claude = item_data["claude"]
@@ -299,15 +305,14 @@ class MainWindow(QMainWindow):
       item_claude.setForeground(QBrush(QColor(p_claude[2])))
 
       items = [item_email, item_flash, item_pro, item_claude]
+
       for c, item in enumerate(items):
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-
         if row_has_reset:
           item.setBackground(QBrush(QColor("#ffcdd2")))
           font = item.font()
           font.setBold(True)
           item.setFont(font)
-
         self.table.setItem(row_idx, c, item)
 
   def show_context_menu(self, pos):
@@ -322,21 +327,22 @@ class MainWindow(QMainWindow):
 
     menu = QMenu(self)
     action_copy = menu.addAction("  Copy JSON")
-    action_update_file = menu.addAction(
-        "  Update ke antigravity-accounts.json"
-    )
+    action_update_file = menu.addAction("  Update ke antigravity-accounts.json")
     action_update_db = menu.addAction(
         "  Update Database dari antigravity-accounts.json"
     )
+    menu.addSeparator()
+    action_delete = menu.addAction("  Hapus Akun")
 
     chosen_action = menu.exec(self.table.viewport().mapToGlobal(pos))
-
     if chosen_action == action_copy:
       self.copy_account_json(account_id)
     elif chosen_action == action_update_file:
       self.update_antigravity_file(account_id, email)
     elif chosen_action == action_update_db:
       self.update_db_from_antigravity(account_id, email)
+    elif chosen_action == action_delete:
+      self.delete_account_with_confirmation(account_id, email)
 
   def copy_account_json(self, account_id):
     json_str = self.db.reconstruct_json_by_id(account_id)
@@ -388,9 +394,7 @@ class MainWindow(QMainWindow):
         return
 
       try:
-        # Timpa langsung seluruh isi file target dengan JSON dari DB
         new_data = json.loads(raw_json_str)
-
         with open(target_file, "w", encoding="utf-8") as f:
           json.dump(new_data, f, indent=2)
 
@@ -461,9 +465,7 @@ class MainWindow(QMainWindow):
     if isinstance(file_acc, list) and len(file_acc) > 0:
       file_acc = file_acc[0]
 
-    file_acc_id = (
-        file_acc.get("id") if isinstance(file_acc, dict) else None
-    )
+    file_acc_id = file_acc.get("id") if isinstance(file_acc, dict) else None
     file_acc_email = (
         file_acc.get("email", "Tidak Diketahui")
         if isinstance(file_acc, dict)
@@ -501,4 +503,38 @@ class MainWindow(QMainWindow):
             self,
             "Database Error",
             f"Terjadi kesalahan saat memperbarui database:\n\n{str(e)}",
+        )
+
+  def delete_account_with_confirmation(self, account_id, email):
+    """Menampilkan dialog konfirmasi dan menghapus akun dari database."""
+    confirm = QMessageBox.question(
+        self,
+        "Konfirmasi Hapus Akun",
+        f"Apakah Anda yakin ingin <b>MENGHAPUS PERMANEN</b> akun ini dari database?\n\n"
+        f"Email: <b>{email}</b>\nID: <code>{account_id}</code>",
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.No,
+    )
+
+    if confirm == QMessageBox.StandardButton.Yes:
+      try:
+        success = self.db.delete_account(account_id)
+        if success:
+          QMessageBox.information(
+              self,
+              "Berhasil",
+              f"Akun <b>{email}</b> berhasil dihapus dari database.",
+          )
+          self.load_table_data()
+        else:
+          QMessageBox.warning(
+              self,
+              "Gagal",
+              "Data akun tidak ditemukan atau gagal dihapus.",
+          )
+      except Exception as e:
+        QMessageBox.critical(
+            self,
+            "Database Error",
+            f"Terjadi kesalahan saat menghapus data:\n\n{str(e)}",
         )
