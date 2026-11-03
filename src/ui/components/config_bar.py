@@ -25,6 +25,15 @@ class ConfigBarWidget(QWidget):
     )
     self.lbl_db_status.setToolTip("Menggunakan database lokal: accounts_manager.db")
 
+    # Indikator Enkripsi Akun (AES-256)
+    self.lbl_crypto_status = QLabel("🔓 Enkripsi: Nonaktif")
+    self.lbl_crypto_status.setStyleSheet(
+        "background-color: rgba(128, 128, 128, 0.12); color: #555; border: 1px"
+        " solid rgba(128, 128, 128, 0.3); border-radius: 4px; padding: 4px"
+        " 10px; font-weight: bold; font-size: 11px;"
+    )
+    self.lbl_crypto_status.setToolTip("Enkripsi akun AES-256 tidak aktif")
+
     label_folder = QLabel("<b>Folder Aktif:</b>")
     self.txt_folder_path = QLineEdit()
     self.txt_folder_path.setReadOnly(True)
@@ -39,6 +48,7 @@ class ConfigBarWidget(QWidget):
     self.btn_settings.clicked.connect(self.settings_requested.emit)
 
     layout.addWidget(self.lbl_db_status)
+    layout.addWidget(self.lbl_crypto_status)
     layout.addWidget(label_folder)
     layout.addWidget(self.txt_folder_path)
     layout.addWidget(self.btn_settings)
@@ -48,6 +58,29 @@ class ConfigBarWidget(QWidget):
 
   def set_folder_path(self, path: str):
     self.txt_folder_path.setText(path)
+
+  def set_crypto_status(self, enabled: bool):
+    """Memperbarui badge indikator status enkripsi di UI."""
+    if enabled:
+      self.lbl_crypto_status.setText("🔒 Enkripsi: AES-256 Aktif")
+      self.lbl_crypto_status.setStyleSheet(
+          "background-color: #e8f0fe; color: #1a73e8; border: 1px solid"
+          " #4285f4; border-radius: 4px; padding: 4px 10px; font-weight:"
+          " bold; font-size: 11px;"
+      )
+      self.lbl_crypto_status.setToolTip(
+          "Enkripsi Akun AES-256 Aktif: Data kredensial baru akan otomatis dienkripsi"
+      )
+    else:
+      self.lbl_crypto_status.setText("🔓 Enkripsi: Nonaktif")
+      self.lbl_crypto_status.setStyleSheet(
+          "background-color: rgba(128, 128, 128, 0.12); color: #555; border:"
+          " 1px solid rgba(128, 128, 128, 0.3); border-radius: 4px; padding:"
+          " 4px 10px; font-weight: bold; font-size: 11px;"
+      )
+      self.lbl_crypto_status.setToolTip(
+          "Enkripsi akun AES-256 tidak aktif (data disimpan plaintext)"
+      )
 
   def set_db_status(
       self,

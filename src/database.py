@@ -1,6 +1,7 @@
 import json
 import sqlite3
 from typing import Optional
+from src.crypto import decrypt_aes256, encrypt_aes256
 from src.turso_client import TursoClient
 
 
@@ -44,6 +45,7 @@ class AccountDatabase:
             added_at INTEGER,
             last_used INTEGER,
             cached_quota_updated_at INTEGER,
+            is_encrypted INTEGER NOT NULL DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """
@@ -82,6 +84,11 @@ class AccountDatabase:
             (create_fingerprints_sql, None),
             (create_quotas_sql, None),
         ])
+        # Migrasi kolom is_encrypted bila tabel sudah ada sebelumnya
+        try:
+          self.turso_client.execute("ALTER TABLE accounts ADD COLUMN is_encrypted INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+          pass
       except Exception:
         # Jika database offline / belum terhubung saat startup, abaikan agar tidak crash
         pass
@@ -91,10 +98,21 @@ class AccountDatabase:
         cursor.execute(create_accounts_sql)
         cursor.execute(create_fingerprints_sql)
         cursor.execute(create_quotas_sql)
+        # Migrasi kolom is_encrypted untuk SQLite lokal
+        cursor.execute("PRAGMA table_info(accounts);")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "is_encrypted" not in columns:
+          cursor.execute("ALTER TABLE accounts ADD COLUMN is_encrypted INTEGER NOT NULL DEFAULT 0;")
         conn.commit()
 
-  def insert_or_update_json(self, raw_json_str):
-    """Parsing JSON dan menyimpannya ke database (Local SQLite atau Turso)."""
+  def insert_or_update_json(
+      self, raw_json_str: str, encrypt: bool = False, password: str = ""
+  ) -> int:
+    """Parsing JSON dan menyimpannya ke database (Local SQLite atau Turso).
+
+    Jika encrypt=True dan password diberikan, refreshToken dan sessionToken
+    akan dienkripsi dengan AES-256 dan ditandai is_encrypted=1.
+    """
     data = json.loads(raw_json_str)
     accounts = (
         data.get("accounts", [data])
@@ -105,6 +123,7 @@ class AccountDatabase:
       accounts = [accounts]
 
     inserted_count = 0
+    is_encrypted_val = 1 if (encrypt and password) else 0
 
     if self.use_turso and self.turso_client:
       pipeline_stmts = []
@@ -112,22 +131,31 @@ class AccountDatabase:
         if "id" not in acc or "email" not in acc:
           continue
         acc_id = acc.get("id")
+        raw_rt = acc.get("refreshToken", "")
+        stored_rt = (
+            encrypt_aes256(raw_rt, password)
+            if is_encrypted_val and raw_rt
+            else raw_rt
+        )
+
         sql_acc = """
             INSERT INTO accounts (
                 id, email, refresh_token, project_id, managed_project_id,
-                enabled, verification_required, added_at, last_used, cached_quota_updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                enabled, verification_required, added_at, last_used, cached_quota_updated_at,
+                is_encrypted
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 email=excluded.email,
                 refresh_token=excluded.refresh_token,
                 enabled=excluded.enabled,
                 last_used=excluded.last_used,
-                cached_quota_updated_at=excluded.cached_quota_updated_at
+                cached_quota_updated_at=excluded.cached_quota_updated_at,
+                is_encrypted=excluded.is_encrypted
         """
         args_acc = [
             acc_id,
             acc.get("email"),
-            acc.get("refreshToken", ""),
+            stored_rt,
             acc.get("projectId"),
             acc.get("managedProjectId"),
             1 if acc.get("enabled", True) else 0,
@@ -135,11 +163,19 @@ class AccountDatabase:
             acc.get("addedAt"),
             acc.get("lastUsed"),
             acc.get("cachedQuotaUpdatedAt"),
+            is_encrypted_val,
         ]
         pipeline_stmts.append((sql_acc, args_acc))
 
         fp = acc.get("fingerprint", {})
         cm = fp.get("clientMetadata", {})
+        raw_st = fp.get("sessionToken", "")
+        stored_st = (
+            encrypt_aes256(raw_st, password)
+            if is_encrypted_val and raw_st
+            else raw_st
+        )
+
         sql_fp = """
             INSERT INTO account_fingerprints (
                 account_id, device_id, session_token, user_agent,
@@ -154,7 +190,7 @@ class AccountDatabase:
         args_fp = [
             acc_id,
             fp.get("deviceId"),
-            fp.get("sessionToken"),
+            stored_st,
             fp.get("userAgent"),
             fp.get("apiClient"),
             cm.get("ideType"),
@@ -201,23 +237,32 @@ class AccountDatabase:
           if "id" not in acc or "email" not in acc:
             continue
           acc_id = acc.get("id")
+          raw_rt = acc.get("refreshToken", "")
+          stored_rt = (
+              encrypt_aes256(raw_rt, password)
+              if is_encrypted_val and raw_rt
+              else raw_rt
+          )
+
           cursor.execute(
               """
               INSERT INTO accounts (
                   id, email, refresh_token, project_id, managed_project_id,
-                  enabled, verification_required, added_at, last_used, cached_quota_updated_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  enabled, verification_required, added_at, last_used, cached_quota_updated_at,
+                  is_encrypted
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(id) DO UPDATE SET
                   email=excluded.email,
                   refresh_token=excluded.refresh_token,
                   enabled=excluded.enabled,
                   last_used=excluded.last_used,
-                  cached_quota_updated_at=excluded.cached_quota_updated_at
+                  cached_quota_updated_at=excluded.cached_quota_updated_at,
+                  is_encrypted=excluded.is_encrypted
               """,
               (
                   acc_id,
                   acc.get("email"),
-                  acc.get("refreshToken", ""),
+                  stored_rt,
                   acc.get("projectId"),
                   acc.get("managedProjectId"),
                   1 if acc.get("enabled", True) else 0,
@@ -225,10 +270,18 @@ class AccountDatabase:
                   acc.get("addedAt"),
                   acc.get("lastUsed"),
                   acc.get("cachedQuotaUpdatedAt"),
+                  is_encrypted_val,
               ),
           )
           fp = acc.get("fingerprint", {})
           cm = fp.get("clientMetadata", {})
+          raw_st = fp.get("sessionToken", "")
+          stored_st = (
+              encrypt_aes256(raw_st, password)
+              if is_encrypted_val and raw_st
+              else raw_st
+          )
+
           cursor.execute(
               """
               INSERT INTO account_fingerprints (
@@ -244,7 +297,7 @@ class AccountDatabase:
               (
                   acc_id,
                   fp.get("deviceId"),
-                  fp.get("sessionToken"),
+                  stored_st,
                   fp.get("userAgent"),
                   fp.get("apiClient"),
                   cm.get("ideType"),
@@ -329,11 +382,16 @@ class AccountDatabase:
         cursor = conn.cursor()
         return cursor.execute(query).fetchall()
 
-  def reconstruct_json_by_id(self, account_id: str):
-    """Membuka kembali data dari SQLite / Turso dan mengembalikannya ke format JSON utuh."""
+  def reconstruct_json_by_id(self, account_id: str, password: str = ""):
+    """Membuka kembali data dari SQLite / Turso dan mengembalikannya ke format JSON utuh.
+
+    Jika akun tersimpan dalam kondisi terenkripsi (is_encrypted == 1), data token
+    akan didekripsi menggunakan password.
+    """
     query_acc = """
         SELECT id, refresh_token, project_id, email, enabled, added_at,
-                last_used, verification_required, managed_project_id, cached_quota_updated_at
+                last_used, verification_required, managed_project_id, cached_quota_updated_at,
+                is_encrypted
         FROM accounts WHERE id = ?
     """
     query_fp = """
@@ -374,9 +432,29 @@ class AccountDatabase:
           "modelCount": q[4],
       }
 
+    is_encrypted = bool(acc_row[10]) if len(acc_row) > 10 and acc_row[10] else False
+    raw_rt = acc_row[1] or ""
+    raw_st = fp_row[1] if fp_row and fp_row[1] else ""
+
+    if is_encrypted:
+      if not password:
+        raise ValueError(
+            "Akun ini terenkripsi. Silakan atur/masukkan password enkripsi di Menu Pengaturan."
+        )
+      try:
+        final_refresh_token = decrypt_aes256(raw_rt, password) if raw_rt else ""
+        final_session_token = decrypt_aes256(raw_st, password) if raw_st else ""
+      except Exception as e:
+        raise ValueError(
+            f"Gagal mendekripsi akun (password mungkin salah atau data korup): {e}"
+        )
+    else:
+      final_refresh_token = raw_rt
+      final_session_token = raw_st
+
     account_json = {
         "id": acc_row[0],
-        "refreshToken": acc_row[1],
+        "refreshToken": final_refresh_token,
         "projectId": acc_row[2],
         "email": acc_row[3],
         "enabled": bool(acc_row[4]),
@@ -387,7 +465,7 @@ class AccountDatabase:
         "rateLimitResetTimes": {},
         "fingerprint": {
             "deviceId": fp_row[0] if fp_row else "",
-            "sessionToken": fp_row[1] if fp_row else "",
+            "sessionToken": final_session_token,
             "userAgent": fp_row[2] if fp_row else "",
             "apiClient": fp_row[3] if fp_row else "",
             "clientMetadata": {

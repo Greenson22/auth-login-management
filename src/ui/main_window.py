@@ -86,6 +86,8 @@ class MainWindow(QMainWindow):
       # Muat ulang folder di UI dari pengaturan terbaru
       folder = self.settings.value("antigravity_folder", "") or self.settings.value("opencode_folder", "")
       self.config_bar.set_folder_path(folder)
+      # Perbarui status indikator enkripsi di menu awal
+      self.config_bar.set_crypto_status(self._is_encryption_enabled())
       # Inisialisasi ulang database dan segarkan akun
       self.init_database_connection()
       self.reload_accounts()
@@ -123,13 +125,27 @@ class MainWindow(QMainWindow):
       self.db = AccountDatabase(use_turso=False)
       self.config_bar.set_db_status(use_turso=False)
 
+  def _is_encryption_enabled(self) -> bool:
+    """Mengecek apakah enkripsi AES-256 diaktifkan pada pengaturan."""
+    val = self.settings.value("enable_encryption", False)
+    if isinstance(val, str):
+      return val.lower() in ("true", "1")
+    return bool(val)
+
+  def _get_encryption_password(self) -> str:
+    """Mengambil password enkripsi AES-256 yang tersimpan."""
+    return self.settings.value("aes256_password", "") or ""
+
   def load_settings(self):
-    """Memuat folder dan preferensi sorting yang tersimpan dari QSettings."""
+    """Memuat folder, preferensi sorting, dan indikator enkripsi dari QSettings."""
     saved_folder = self.settings.value("antigravity_folder", "") or self.settings.value("opencode_folder", "")
     self.config_bar.set_folder_path(saved_folder)
 
     saved_sort = self.settings.value("sort_mode_index", 0, type=int)
     self.account_table.set_sort_index(saved_sort)
+
+    # Indikator enkripsi
+    self.config_bar.set_crypto_status(self._is_encryption_enabled())
 
   def _on_sort_mode_changed(self, index: int):
     self.settings.setValue("sort_mode_index", index)
@@ -158,10 +174,24 @@ class MainWindow(QMainWindow):
       QMessageBox.warning(self, "Peringatan", "Area teks JSON masih kosong!")
       return
 
+    encrypt = self._is_encryption_enabled()
+    pwd = self._get_encryption_password()
+
+    if encrypt and not pwd:
+      QMessageBox.warning(
+          self,
+          "Password Enkripsi Belum Diatur",
+          "Opsi enkripsi akun sedang aktif namun password enkripsi belum diatur!\n"
+          "Silakan buka Menu Pengaturan untuk menyetel password enkripsi.",
+      )
+      self.open_settings_dialog()
+      return
+
     try:
-      count = self.db.insert_or_update_json(raw_text)
+      count = self.db.insert_or_update_json(raw_text, encrypt=encrypt, password=pwd)
+      info_enc = " (Terenkripsi AES-256)" if encrypt else ""
       QMessageBox.information(
-          self, "Sukses", f"Berhasil menyimpan {count} akun!"
+          self, "Sukses", f"Berhasil menyimpan {count} akun!{info_enc}"
       )
       self.json_input.clear_input()
       self.reload_accounts()
@@ -175,15 +205,27 @@ class MainWindow(QMainWindow):
       )
 
   def copy_account_json(self, account_id: str):
-    json_str = self.db.reconstruct_json_by_id(account_id)
-    if json_str:
-      QApplication.clipboard().setText(json_str)
-      QMessageBox.information(
-          self, "Disalin!", "Format JSON utuh berhasil disalin ke clipboard!"
+    pwd = self._get_encryption_password()
+    try:
+      json_str = self.db.reconstruct_json_by_id(account_id, password=pwd)
+      if json_str:
+        QApplication.clipboard().setText(json_str)
+        QMessageBox.information(
+            self, "Disalin!", "Format JSON utuh berhasil disalin ke clipboard!"
+        )
+      else:
+        QMessageBox.warning(
+            self, "Gagal", "Gagal mengembalikan format JSON dari database."
+        )
+    except ValueError as e:
+      QMessageBox.critical(
+          self,
+          "Gagal Mendekripsi",
+          f"Tidak dapat menyalin data akun:\n\n{str(e)}",
       )
-    else:
-      QMessageBox.warning(
-          self, "Gagal", "Gagal mengembalikan format JSON dari database."
+    except Exception as e:
+      QMessageBox.critical(
+          self, "Error", f"Terjadi kesalahan saat memproses data:\n\n{str(e)}"
       )
 
   def update_antigravity_file(self, account_id: str, email: str):
@@ -216,7 +258,22 @@ class MainWindow(QMainWindow):
     )
 
     if confirm == QMessageBox.StandardButton.Yes:
-      raw_json_str = self.db.reconstruct_json_by_id(account_id)
+      pwd = self._get_encryption_password()
+      try:
+        raw_json_str = self.db.reconstruct_json_by_id(account_id, password=pwd)
+      except ValueError as e:
+        QMessageBox.critical(
+            self,
+            "Gagal Mendekripsi Akun",
+            f"Tidak dapat menulis ke file Antigravity karena data akun terenkripsi:\n\n{str(e)}",
+        )
+        return
+      except Exception as e:
+        QMessageBox.critical(
+            self, "Error", f"Terjadi kesalahan saat membaca database:\n\n{str(e)}"
+        )
+        return
+
       if not raw_json_str:
         QMessageBox.critical(
             self, "Error", "Gagal mengambil data akun dari database."
@@ -320,12 +377,25 @@ class MainWindow(QMainWindow):
     )
 
     if confirm == QMessageBox.StandardButton.Yes:
+      encrypt = self._is_encryption_enabled()
+      pwd = self._get_encryption_password()
+      if encrypt and not pwd:
+        QMessageBox.warning(
+            self,
+            "Password Enkripsi Belum Diatur",
+            "Opsi enkripsi akun sedang aktif namun password enkripsi belum diatur!\n"
+            "Silakan atur password di Menu Pengaturan.",
+        )
+        self.open_settings_dialog()
+        return
+
       try:
-        self.db.insert_or_update_json(content)
+        self.db.insert_or_update_json(content, encrypt=encrypt, password=pwd)
+        info_enc = " (Terenkripsi AES-256)" if encrypt else ""
         QMessageBox.information(
             self,
             "Berhasil Update Database",
-            "Berhasil mengonfirmasi & memperbarui data akun ke database!",
+            f"Berhasil mengonfirmasi & memperbarui data akun ke database!{info_enc}",
         )
         self.reload_accounts()
       except Exception as e:

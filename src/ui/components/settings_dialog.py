@@ -134,27 +134,39 @@ class SettingsDialog(QDialog):
     # =========================================================================
     crypto_group = QGroupBox("Enkripsi Akun (AES-256)")
     crypto_layout = QVBoxLayout(crypto_group)
+    crypto_layout.setSpacing(10)
+
+    self.chk_enable_crypto = QCheckBox("Aktifkan Enkripsi Akun (AES-256)")
+    self.chk_enable_crypto.setStyleSheet("font-weight: bold; font-size: 13px;")
+    self.chk_enable_crypto.toggled.connect(self._on_crypto_toggled)
+    crypto_layout.addWidget(self.chk_enable_crypto)
 
     crypto_desc = QLabel(
-        "Atur password master untuk mengamankan data akun menggunakan enkripsi AES-256."
+        "Jika diaktifkan, data kredensial akun yang dimasukkan via Paste JSON "
+        "akan disimpan ke database dalam bentuk terenkripsi AES-256 menggunakan password master di bawah."
     )
     crypto_desc.setWordWrap(True)
+    crypto_desc.setStyleSheet(
+        "color: #444; background-color: rgba(0, 0, 0, 0.04); padding: 8px; border-radius: 4px; line-height: 140%;"
+    )
     crypto_layout.addWidget(crypto_desc)
 
-    form_layout = QFormLayout()
-    form_layout.setContentsMargins(0, 8, 0, 0)
+    self.crypto_form_widget = QWidget()
+    form_layout = QFormLayout(self.crypto_form_widget)
+    form_layout.setContentsMargins(0, 4, 0, 0)
+    form_layout.setSpacing(8)
 
     self.txt_password = QLineEdit()
     self.txt_password.setEchoMode(QLineEdit.EchoMode.Password)
-    self.txt_password.setPlaceholderText("Masukkan password enkripsi")
+    self.txt_password.setPlaceholderText("Masukkan password master enkripsi...")
 
     self.txt_confirm_password = QLineEdit()
     self.txt_confirm_password.setEchoMode(QLineEdit.EchoMode.Password)
-    self.txt_confirm_password.setPlaceholderText("Ulangi password enkripsi")
+    self.txt_confirm_password.setPlaceholderText("Ulangi konfirmasi password master...")
 
     form_layout.addRow("Password Enkripsi:", self.txt_password)
     form_layout.addRow("Konfirmasi Password:", self.txt_confirm_password)
-    crypto_layout.addLayout(form_layout)
+    crypto_layout.addWidget(self.crypto_form_widget)
 
     self.chk_show_password = QCheckBox("Tampilkan Password")
     self.chk_show_password.toggled.connect(self._toggle_show_password)
@@ -182,6 +194,11 @@ class SettingsDialog(QDialog):
     buttons_layout.addWidget(self.btn_cancel)
     buttons_layout.addWidget(self.btn_save)
     main_layout.addLayout(buttons_layout)
+
+  def _on_crypto_toggled(self, checked: bool):
+    """Mengaktifkan/menonaktifkan form input password enkripsi sesuai status checkbox."""
+    self.crypto_form_widget.setEnabled(checked)
+    self.chk_show_password.setEnabled(checked)
 
   def _on_turso_toggled(self, checked: bool):
     """Mengaktifkan/menonaktifkan input Turso sesuai status checkbox."""
@@ -247,6 +264,16 @@ class SettingsDialog(QDialog):
       folder = self.settings.value("opencode_folder", "")
     self.txt_folder_path.setText(folder)
 
+    # Memuat pengaturan Enkripsi (default: False)
+    enable_crypto_val = self.settings.value("enable_encryption", False)
+    if isinstance(enable_crypto_val, str):
+      enable_crypto = enable_crypto_val.lower() in ("true", "1")
+    else:
+      enable_crypto = bool(enable_crypto_val)
+
+    self.chk_enable_crypto.setChecked(enable_crypto)
+    self._on_crypto_toggled(enable_crypto)
+
     saved_password = self.settings.value("aes256_password", "")
     if saved_password:
       self.txt_password.setText(saved_password)
@@ -267,11 +294,29 @@ class SettingsDialog(QDialog):
 
   def _save_settings(self):
     folder = self.txt_folder_path.text().strip()
+    enable_crypto = self.chk_enable_crypto.isChecked()
     pwd = self.txt_password.text()
     confirm_pwd = self.txt_confirm_password.text()
 
-    if pwd or confirm_pwd:
+    if enable_crypto:
+      if not pwd:
+        QMessageBox.warning(
+            self,
+            "Password Enkripsi Kosong",
+            "Enkripsi akun diaktifkan, harap masukkan Password Enkripsi!",
+        )
+        self.txt_password.setFocus()
+        return
       if pwd != confirm_pwd:
+        QMessageBox.warning(
+            self,
+            "Password Tidak Cocok",
+            "Password enkripsi dan konfirmasi password tidak sama. Silakan periksa kembali!",
+        )
+        self.txt_confirm_password.setFocus()
+        return
+    else:
+      if (pwd or confirm_pwd) and pwd != confirm_pwd:
         QMessageBox.warning(
             self,
             "Password Tidak Cocok",
@@ -304,6 +349,7 @@ class SettingsDialog(QDialog):
     # Simpan ke QSettings
     self.settings.setValue("antigravity_folder", folder)
     self.settings.setValue("opencode_folder", folder)
+    self.settings.setValue("enable_encryption", enable_crypto)
     self.settings.setValue("aes256_password", pwd)
 
     self.settings.setValue("use_turso", use_turso)
