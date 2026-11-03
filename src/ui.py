@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QPushButton, QTableWidget, QTableWidgetItem, QLabel,
-    QHeaderView, QMessageBox, QSplitter, QFileDialog, QLineEdit, QMenu
+    QHeaderView, QMessageBox, QSplitter, QFileDialog, QLineEdit, QMenu,
+    QComboBox
 )
 from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtGui import QColor, QBrush
@@ -13,12 +14,9 @@ from src.database import AccountDatabase
 
 def parse_quota_info(remaining_fraction, reset_time):
     """
-    Mengembalikan tuple: (formatted_text, is_reset_passed, color_hex)
-    - text: Format "100% (04 Nov 2026, 12:30)"
-    - is_reset_passed: True jika waktu reset sudah tercapai/berlalu
-    - color_hex: Warna teks persentase (Hijau/Kuning/Merah)
+    Mengembalikan tuple: (formatted_text, is_reset_passed, color_hex, raw_percent, raw_timestamp)
     """
-    # 1. Hitung Persentase & Warna Teks Persentase
+    # 1. Hitung Persentase
     percent_val = None
     if remaining_fraction is not None:
         try:
@@ -29,36 +27,36 @@ def parse_quota_info(remaining_fraction, reset_time):
     else:
         percentage_str = "-"
 
-    # Tentukan warna teks berdasarkan persentase
+    # Warna teks persentase
     if percent_val is None:
-        text_color = "#888888"  # Abu-abu
+        text_color = "#888888"
     elif percent_val >= 70:
-        text_color = "#2e7d32"  # Hijau
+        text_color = "#2e7d32"
     elif percent_val >= 30:
-        text_color = "#f57c00"  # Oranye/Kuning
+        text_color = "#f57c00"
     else:
-        text_color = "#c62828"  # Merah
+        text_color = "#c62828"
 
     # 2. Cek Reset Time
     formatted_time = "-"
     is_reset_passed = False
+    raw_timestamp = 9999999999999  # Nilai default tinggi untuk sorting
 
     if reset_time and reset_time != "-":
         try:
             if str(reset_time).isdigit() or isinstance(reset_time, (int, float)):
                 ts = float(reset_time)
-                if ts > 1e11:  # Milidetik
+                if ts > 1e11:
                     ts /= 1000.0
                 dt = datetime.fromtimestamp(ts, tz=timezone.utc)
             else:
                 clean_str = reset_time.replace("Z", "+00:00")
                 dt = datetime.fromisoformat(clean_str)
 
-            # Ubah ke datetime lokal
+            raw_timestamp = dt.timestamp()
             dt_local = dt.astimezone()
             formatted_time = dt_local.strftime("%d %b %Y, %H:%M")
 
-            # Pengecekan apakah waktu reset sudah lewat dari waktu saat ini
             now = datetime.now(dt.tzinfo or timezone.utc)
             if dt <= now:
                 is_reset_passed = True
@@ -70,7 +68,7 @@ def parse_quota_info(remaining_fraction, reset_time):
     else:
         display_text = f"{percentage_str} ({formatted_time})"
 
-    return display_text, is_reset_passed, text_color
+    return display_text, is_reset_passed, text_color, percent_val, raw_timestamp
 
 
 class MainWindow(QMainWindow):
@@ -84,13 +82,13 @@ class MainWindow(QMainWindow):
 
     def init_ui(self):
         self.setWindowTitle("JSON Account Manager (PyQt6)")
-        self.resize(1050, 650)
+        self.resize(1100, 700)
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
 
         # ------------------------------------------
-        # BAGIAN ATAS: PENGATURAN FOLDER OPENCODE CONFIG
+        # BAGIAN ATAS: FOLDER CONFIG & CONTROL BAR
         # ------------------------------------------
         config_layout = QHBoxLayout()
         label_folder = QLabel("<b>Folder OpenCode Config:</b>")
@@ -137,13 +135,36 @@ class MainWindow(QMainWindow):
         top_layout.addLayout(btn_layout)
 
         # ------------------------------------------
-        # BAGIAN BAWAH: TABEL
+        # BAGIAN BAWAH: TABEL & CONTROL SORTING
         # ------------------------------------------
         bottom_widget = QWidget()
         bottom_layout = QVBoxLayout(bottom_widget)
         bottom_layout.setContentsMargins(0, 5, 0, 0)
 
+        # Bar Pengurutan (Sorting Bar)
+        sort_layout = QHBoxLayout()
         label_table = QLabel("<b>Daftar Akun:</b> (Klik kanan pada baris untuk menu aksi)")
+        
+        label_sort = QLabel("<b>Urutkan Berdasarkan:</b>")
+        self.cmb_sort_mode = QComboBox()
+        self.cmb_sort_mode.addItems([
+            "Email (A-Z)",
+            "Email (Z-A)",
+            "Reset Time Tercepat",
+            "Token Terbanyak (Flash)",
+            "Token Tersedikit (Flash)",
+            "Token Terbanyak (Pro)",
+            "Token Tersedikit (Pro)",
+            "Token Terbanyak (Claude)",
+            "Token Tersedikit (Claude)"
+        ])
+        self.cmb_sort_mode.currentIndexChanged.connect(self.on_sort_changed)
+
+        sort_layout.addWidget(label_table)
+        sort_layout.addStretch()
+        sort_layout.addWidget(label_sort)
+        sort_layout.addWidget(self.cmb_sort_mode)
+
         self.table = QTableWidget()
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels([
@@ -153,16 +174,15 @@ class MainWindow(QMainWindow):
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         
-        # Aktifkan Custom Context Menu (Klik Kanan)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_context_menu)
 
-        bottom_layout.addWidget(label_table)
+        bottom_layout.addLayout(sort_layout)
         bottom_layout.addWidget(self.table)
 
         splitter.addWidget(top_widget)
         splitter.addWidget(bottom_widget)
-        splitter.setSizes([160, 440])
+        splitter.setSizes([150, 450])
 
         main_layout.addWidget(splitter)
 
@@ -175,10 +195,19 @@ class MainWindow(QMainWindow):
             self.settings.setValue("opencode_folder", folder)
 
     def load_settings(self):
-        """Memuat folder yang tersimpan dari QSettings."""
+        """Memuat folder dan preferensi sorting yang tersimpan dari QSettings."""
         saved_folder = self.settings.value("opencode_folder", "")
         if saved_folder:
             self.txt_folder_path.setText(saved_folder)
+
+        saved_sort = self.settings.value("sort_mode_index", 0, type=int)
+        if 0 <= saved_sort < self.cmb_sort_mode.count():
+            self.cmb_sort_mode.setCurrentIndex(saved_sort)
+
+    def on_sort_changed(self, index):
+        """Simpan pilihan pengurutan ke QSettings dan muat ulang tabel."""
+        self.settings.setValue("sort_mode_index", index)
+        self.load_table_data()
 
     def process_json(self):
         """Handler saat menyimpan JSON baru."""
@@ -198,44 +227,81 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Database Error", f"Terjadi kesalahan:\n\n{str(e)}")
 
     def load_table_data(self):
-        """Memuat daftar akun ke dalam tabel dengan pewarnaan visual."""
+        """Memuat daftar akun ke dalam tabel dan menerapkan logika pengurutan."""
         rows = self.db.fetch_accounts_summary()
-        self.table.setRowCount(0)
+        parsed_list = []
 
-        for row_idx, row_data in enumerate(rows):
+        # Parse semua baris data terlebih dahulu
+        for row_data in rows:
             acc_id, email, flash_reset, flash_frac, pro_reset, pro_frac, claude_reset, claude_frac = row_data
+            
+            p_flash = parse_quota_info(flash_frac, flash_reset)
+            p_pro = parse_quota_info(pro_frac, pro_reset)
+            p_claude = parse_quota_info(claude_frac, claude_reset)
+
+            # Hitung timestamp reset tercepat (di antara 3 model)
+            min_reset_ts = min(p_flash[4], p_pro[4], p_claude[4])
+
+            parsed_list.append({
+                "acc_id": acc_id,
+                "email": email or "-",
+                "flash": p_flash,
+                "pro": p_pro,
+                "claude": p_claude,
+                "min_reset_ts": min_reset_ts
+            })
+
+        # Logika Pengurutan
+        sort_mode = self.cmb_sort_mode.currentText()
+        if sort_mode == "Email (A-Z)":
+            parsed_list.sort(key=lambda x: x["email"].lower())
+        elif sort_mode == "Email (Z-A)":
+            parsed_list.sort(key=lambda x: x["email"].lower(), reverse=True)
+        elif sort_mode == "Reset Time Tercepat":
+            parsed_list.sort(key=lambda x: x["min_reset_ts"])
+        elif sort_mode == "Token Terbanyak (Flash)":
+            parsed_list.sort(key=lambda x: (x["flash"][3] if x["flash"][3] is not None else -1), reverse=True)
+        elif sort_mode == "Token Tersedikit (Flash)":
+            parsed_list.sort(key=lambda x: (x["flash"][3] if x["flash"][3] is not None else 999))
+        elif sort_mode == "Token Terbanyak (Pro)":
+            parsed_list.sort(key=lambda x: (x["pro"][3] if x["pro"][3] is not None else -1), reverse=True)
+        elif sort_mode == "Token Tersedikit (Pro)":
+            parsed_list.sort(key=lambda x: (x["pro"][3] if x["pro"][3] is not None else 999))
+        elif sort_mode == "Token Terbanyak (Claude)":
+            parsed_list.sort(key=lambda x: (x["claude"][3] if x["claude"][3] is not None else -1), reverse=True)
+        elif sort_mode == "Token Tersedikit (Claude)":
+            parsed_list.sort(key=lambda x: (x["claude"][3] if x["claude"][3] is not None else 999))
+
+        # Tampilkan ke QTableWidget
+        self.table.setRowCount(0)
+        for row_idx, item_data in enumerate(parsed_list):
             self.table.insertRow(row_idx)
 
-            # Parse masing-masing model
-            txt_flash, is_passed_flash, color_flash = parse_quota_info(flash_frac, flash_reset)
-            txt_pro, is_passed_pro, color_pro = parse_quota_info(pro_frac, pro_reset)
-            txt_claude, is_passed_claude, color_claude = parse_quota_info(claude_frac, claude_reset)
+            p_flash = item_data["flash"]
+            p_pro = item_data["pro"]
+            p_claude = item_data["claude"]
 
-            # Cek apakah ada salah satu model yang sudah ter-reset
-            row_has_reset = is_passed_flash or is_passed_pro or is_passed_claude
+            row_has_reset = p_flash[1] or p_pro[1] or p_claude[1]
 
-            # Set items
-            item_email = QTableWidgetItem(email or "-")
-            item_email.setData(Qt.ItemDataRole.UserRole, acc_id)
+            item_email = QTableWidgetItem(item_data["email"])
+            item_email.setData(Qt.ItemDataRole.UserRole, item_data["acc_id"])
             
-            item_flash = QTableWidgetItem(txt_flash)
-            item_flash.setForeground(QBrush(QColor(color_flash)))
+            item_flash = QTableWidgetItem(p_flash[0])
+            item_flash.setForeground(QBrush(QColor(p_flash[2])))
 
-            item_pro = QTableWidgetItem(txt_pro)
-            item_pro.setForeground(QBrush(QColor(color_pro)))
+            item_pro = QTableWidgetItem(p_pro[0])
+            item_pro.setForeground(QBrush(QColor(p_pro[2])))
 
-            item_claude = QTableWidgetItem(txt_claude)
-            item_claude.setForeground(QBrush(QColor(color_claude)))
+            item_claude = QTableWidgetItem(p_claude[0])
+            item_claude.setForeground(QBrush(QColor(p_claude[2])))
 
             items = [item_email, item_flash, item_pro, item_claude]
 
             for c, item in enumerate(items):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 
-                # Jika waktu reset sudah tercapai, buat latar belakang baris berwarna merah muda mencolok
                 if row_has_reset:
-                    item.setBackground(QBrush(QColor("#ffcdd2")))  # Merah muda mencolok
-                    # Tebalkan font untuk penanda visual ekstra
+                    item.setBackground(QBrush(QColor("#ffcdd2")))
                     font = item.font()
                     font.setBold(True)
                     item.setFont(font)
