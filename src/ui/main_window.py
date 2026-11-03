@@ -2,6 +2,7 @@ import json
 import os
 
 from PyQt6.QtCore import QSettings, Qt
+from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -12,7 +13,12 @@ from PyQt6.QtWidgets import (
 )
 
 from src.database import AccountDatabase
-from src.ui.components import AccountTableWidget, ConfigBarWidget, JsonInputWidget
+from src.ui.components import (
+    AccountTableWidget,
+    ConfigBarWidget,
+    JsonInputWidget,
+    SettingsDialog,
+)
 
 
 class MainWindow(QMainWindow):
@@ -49,6 +55,7 @@ class MainWindow(QMainWindow):
 
     # Menghubungkan sinyal-sinyal komponen
     self.config_bar.folder_changed.connect(self._on_folder_changed)
+    self.config_bar.settings_requested.connect(self.open_settings_dialog)
     self.json_input.json_submitted.connect(self.process_json)
 
     self.account_table.sort_mode_changed.connect(self._on_sort_mode_changed)
@@ -57,9 +64,32 @@ class MainWindow(QMainWindow):
     self.account_table.update_db_requested.connect(self.update_db_from_antigravity)
     self.account_table.delete_requested.connect(self.delete_account_with_confirmation)
 
+    # Inisialisasi Menu Bar
+    self._init_menu_bar()
+
+  def _init_menu_bar(self):
+    menu_bar = self.menuBar()
+    
+    settings_menu = menu_bar.addMenu("&Pengaturan")
+
+    settings_action = QAction("&Buka Pengaturan...", self)
+    settings_action.setShortcut(QKeySequence("Ctrl+,"))
+    settings_action.setStatusTip("Atur folder Antigravity dan password enkripsi AES-256")
+    settings_action.triggered.connect(self.open_settings_dialog)
+
+    settings_menu.addAction(settings_action)
+
+  def open_settings_dialog(self):
+    dialog = SettingsDialog(self)
+    if dialog.exec() == SettingsDialog.DialogCode.Accepted:
+      # Muat ulang folder di UI dari pengaturan terbaru
+      folder = self.settings.value("antigravity_folder", "") or self.settings.value("opencode_folder", "")
+      if folder:
+        self.config_bar.set_folder_path(folder)
+
   def load_settings(self):
     """Memuat folder dan preferensi sorting yang tersimpan dari QSettings."""
-    saved_folder = self.settings.value("opencode_folder", "")
+    saved_folder = self.settings.value("antigravity_folder", "") or self.settings.value("opencode_folder", "")
     if saved_folder:
       self.config_bar.set_folder_path(saved_folder)
 
@@ -67,6 +97,7 @@ class MainWindow(QMainWindow):
     self.account_table.set_sort_index(saved_sort)
 
   def _on_folder_changed(self, folder: str):
+    self.settings.setValue("antigravity_folder", folder)
     self.settings.setValue("opencode_folder", folder)
 
   def _on_sort_mode_changed(self, index: int):
@@ -117,7 +148,7 @@ class MainWindow(QMainWindow):
       QMessageBox.warning(
           self,
           "Folder Tidak Valid",
-          "Silakan pilih folder OpenCode Config terlebih dahulu!",
+          "Silakan pilih folder Antigravity terlebih dahulu lewat Menu Pengaturan!",
       )
       return
 
@@ -172,7 +203,7 @@ class MainWindow(QMainWindow):
       QMessageBox.warning(
           self,
           "Folder Tidak Valid",
-          "Silakan pilih folder OpenCode Config terlebih dahulu!",
+          "Silakan pilih folder Antigravity terlebih dahulu lewat Menu Pengaturan!",
       )
       return
 
