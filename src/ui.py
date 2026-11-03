@@ -189,14 +189,17 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
         action_copy = menu.addAction("📋 Copy JSON")
-        action_update = menu.addAction("🔄 Update ke antigravity-accounts.json")
+        action_update_file = menu.addAction("🔄 Update ke antigravity-accounts.json")
+        action_update_db = menu.addAction("📥 Update Database dari antigravity-accounts.json")
 
         # Eksekusi menu
         chosen_action = menu.exec(self.table.viewport().mapToGlobal(pos))
         if chosen_action == action_copy:
             self.copy_account_json(account_id)
-        elif chosen_action == action_update:
+        elif chosen_action == action_update_file:
             self.update_antigravity_file(account_id, email)
+        elif chosen_action == action_update_db:
+            self.update_db_from_antigravity(account_id, email)
 
     def copy_account_json(self, account_id):
         """Merekonstruksi JSON asli dari database lalu menyalinnya ke Clipboard."""
@@ -211,7 +214,7 @@ class MainWindow(QMainWindow):
         """Memperbarui file antigravity-accounts.json di folder config yang dipilih."""
         folder_path = self.txt_folder_path.text().strip()
 
-        # Validasi 1: Folder belum dipilih
+        # Peringatan 1: Folder belum dipilih
         if not folder_path or not os.path.exists(folder_path):
             QMessageBox.warning(
                 self, 
@@ -222,7 +225,7 @@ class MainWindow(QMainWindow):
 
         target_file = os.path.join(folder_path, "antigravity-accounts.json")
 
-        # Validasi 2: Peringatan jika file target tidak ditemukan
+        # Peringatan 2: File target tidak ditemukan
         if not os.path.exists(target_file):
             QMessageBox.warning(
                 self,
@@ -235,7 +238,7 @@ class MainWindow(QMainWindow):
         confirm = QMessageBox.question(
             self,
             "Konfirmasi Update File",
-            f"Apakah Anda yakin ingin menimpa isi file:\n<b>{target_file}</b>\n\ndengan data akun untuk <b>{email}</b>?",
+            f"Apakah Anda yakin ingin menimpa isi file:\n<b>{target_file}</b>\n\ndengan data akun dari database untuk <b>{email}</b>?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
@@ -256,3 +259,80 @@ class MainWindow(QMainWindow):
                 )
             except Exception as e:
                 QMessageBox.critical(self, "Gagal Menulis File", f"Terjadi kesalahan saat menulis file:\n\n{str(e)}")
+
+    def update_db_from_antigravity(self, account_id, email):
+        """Membaca isi antigravity-accounts.json dan memperbarui data akun terpilih di database."""
+        folder_path = self.txt_folder_path.text().strip()
+
+        # Peringatan 1: Folder belum dipilih
+        if not folder_path or not os.path.exists(folder_path):
+            QMessageBox.warning(
+                self,
+                "Folder Tidak Valid",
+                "Silakan pilih folder OpenCode Config terlebih dahulu pada bagian atas!"
+            )
+            return
+
+        target_file = os.path.join(folder_path, "antigravity-accounts.json")
+
+        # Peringatan 2: File tidak ditemukan
+        if not os.path.exists(target_file):
+            QMessageBox.warning(
+                self,
+                "File Tidak Ditemukan",
+                f"File <b>antigravity-accounts.json</b> tidak ditemukan di folder:\n{folder_path}"
+            )
+            return
+
+        # Read & Parse File JSON
+        try:
+            with open(target_file, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if not content:
+                    QMessageBox.warning(self, "File Kosong", "File <b>antigravity-accounts.json</b> kosong!")
+                    return
+                file_data = json.loads(content)
+        except json.JSONDecodeError as e:
+            QMessageBox.critical(self, "Error JSON File", f"Format file antigravity-accounts.json tidak valid!\n\n{str(e)}")
+            return
+        except Exception as e:
+            QMessageBox.critical(self, "Gagal Membaca File", f"Gagal membaca file:\n\n{str(e)}")
+            return
+
+        # Ambil ID Akun dari file JSON (bisa berupa object atau array)
+        file_acc = file_data.get("accounts", [file_data])[0] if isinstance(file_data, dict) and "accounts" in file_data else file_data
+        if isinstance(file_acc, list) and len(file_acc) > 0:
+            file_acc = file_acc[0]
+
+        file_acc_id = file_acc.get("id") if isinstance(file_acc, dict) else None
+        file_acc_email = file_acc.get("email", "Tidak Diketahui") if isinstance(file_acc, dict) else "Tidak Diketahui"
+
+        # Peringatan 3: Apabila ID di file berbeda dengan baris yang dipilih
+        mismatch_warning = ""
+        if file_acc_id and file_acc_id != account_id:
+            mismatch_warning = (
+                f"\n\n<b>⚠️ PERINGATAN BEDA AKUN:</b>\n"
+                f"ID Akun di file (<b>{file_acc_email}</b>) BERBEDA dengan baris yang dipilih di tabel (<b>{email}</b>)!"
+            )
+
+        # Konfirmasi Pengguna
+        confirm = QMessageBox.question(
+            self,
+            "Konfirmasi Update Database",
+            f"Apakah Anda yakin ingin memperbarui data database baris <b>{email}</b> menggunakan isi dari file:\n<b>{target_file}</b>?{mismatch_warning}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if confirm == QMessageBox.StandardButton.Yes:
+            try:
+                # Masukkan/Update data dari file JSON ke SQLite Database
+                count = self.db.insert_or_update_json(content)
+                QMessageBox.information(
+                    self,
+                    "Berhasil Update Database",
+                    f"Berhasil mengonfirmasi & memperbarui data akun ke database!"
+                )
+                self.load_table_data()
+            except Exception as e:
+                QMessageBox.critical(self, "Database Error", f"Terjadi kesalahan saat memperbarui database:\n\n{str(e)}")
