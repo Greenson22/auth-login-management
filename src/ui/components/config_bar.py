@@ -1,11 +1,8 @@
-from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPushButton, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QWidget
 
 
 class ConfigBarWidget(QWidget):
-  """Komponen bar atas untuk menampilkan folder aktif, indikator status Turso/Local DB, dan tombol Pengaturan."""
-
-  settings_requested = pyqtSignal()
+  """Komponen bar atas untuk menampilkan folder aktif serta indikator status Turso/Local DB dan Enkripsi."""
 
   def __init__(self, parent=None):
     super().__init__(parent)
@@ -42,16 +39,10 @@ class ConfigBarWidget(QWidget):
         "QLineEdit { background-color: rgba(128, 128, 128, 0.08); padding: 4px 8px; }"
     )
 
-    self.btn_settings = QPushButton("⚙ Pengaturan...")
-    self.btn_settings.setStyleSheet("padding: 4px 14px; font-weight: bold;")
-    self.btn_settings.setToolTip("Buka Menu Pengaturan untuk database Turso, folder, dan enkripsi (Ctrl+,)")
-    self.btn_settings.clicked.connect(self.settings_requested.emit)
-
     layout.addWidget(self.lbl_db_status)
     layout.addWidget(self.lbl_crypto_status)
     layout.addWidget(label_folder)
     layout.addWidget(self.txt_folder_path)
-    layout.addWidget(self.btn_settings)
 
   def get_folder_path(self) -> str:
     return self.txt_folder_path.text().strip()

@@ -2,7 +2,7 @@ import json
 import os
 
 from PyQt6.QtCore import QSettings, Qt
-from PyQt6.QtGui import QAction, QKeySequence
+from PyQt6.QtGui import QAction, QIcon, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
 from src.database import AccountDatabase
 from src.turso_client import TursoClient
 from src.ui.components import (
+    AboutDialog,
     AccountTableWidget,
     ConfigBarWidget,
     JsonInputWidget,
@@ -40,6 +41,12 @@ class MainWindow(QMainWindow):
     self.setWindowTitle("JSON Account Manager (PyQt6)")
     self.resize(1100, 700)
 
+    # Set Window Icon jika file ada
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    icon_path = os.path.join(base_dir, "assets", "images", "app_icon.png")
+    if os.path.exists(icon_path):
+      self.setWindowIcon(QIcon(icon_path))
+
     main_widget = QWidget()
     self.setCentralWidget(main_widget)
     main_layout = QVBoxLayout(main_widget)
@@ -56,7 +63,6 @@ class MainWindow(QMainWindow):
     splitter.setSizes([150, 450])
     main_layout.addWidget(splitter)
 
-    self.config_bar.settings_requested.connect(self.open_settings_dialog)
     self.json_input.json_submitted.connect(self.process_json)
 
     self.account_table.sort_mode_changed.connect(self._on_sort_mode_changed)
@@ -78,6 +84,19 @@ class MainWindow(QMainWindow):
     settings_action.triggered.connect(self.open_settings_dialog)
 
     settings_menu.addAction(settings_action)
+
+    help_menu = menu_bar.addMenu("&Bantuan")
+
+    about_action = QAction("&Tentang Aplikasi...", self)
+    about_action.setShortcut(QKeySequence("F1"))
+    about_action.setStatusTip("Informasi mengenai fitur aplikasi dan pengembang")
+    about_action.triggered.connect(self.open_about_dialog)
+
+    help_menu.addAction(about_action)
+
+  def open_about_dialog(self):
+    dialog = AboutDialog(self)
+    dialog.exec()
 
   # ─── Helper: Jalankan task di background thread + tampilkan loading dialog ───
 
