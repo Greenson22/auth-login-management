@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=JSON Account Manager
+Comment=Auth Login & JSON Account Management
+Exec=/usr/bin/auth-login-manager
+Icon=auth-login-manager
+Terminal=false
+Categories=Utility;Development;
+StartupWMClass=auth-login-manager
+Keywords=auth;json;account;manager;turso;
