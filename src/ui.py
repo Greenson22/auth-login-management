@@ -1,11 +1,12 @@
+import os
 import json
 from datetime import datetime
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QPushButton, QTableWidget, QTableWidgetItem, QLabel,
-    QHeaderView, QMessageBox, QSplitter
+    QHeaderView, QMessageBox, QSplitter, QFileDialog, QLineEdit, QMenu
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QSettings
 from src.database import AccountDatabase
 
 
@@ -15,21 +16,17 @@ def format_human_time(time_str):
         return "-"
     
     try:
-        # Jika format berupa angka/timestamp Unix (detik atau milidetik)
         if str(time_str).isdigit() or isinstance(time_str, (int, float)):
             ts = float(time_str)
             if ts > 1e11:  # Milidetik
                 ts /= 1000.0
             dt = datetime.fromtimestamp(ts)
         else:
-            # Jika format ISO String (misal: "2026-11-04T05:30:00Z" atau "2026-11-04T05:30:00")
             clean_str = time_str.replace("Z", "+00:00")
             dt = datetime.fromisoformat(clean_str)
             
-        # Format tampilan: "04 Nov 2026, 12:30"
         return dt.strftime("%d %b %Y, %H:%M")
     except Exception:
-        # Jika terjadi kesalahan parsing, tampilkan teks aslinya
         return str(time_str)
 
 
@@ -37,23 +34,45 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.db = AccountDatabase()
+        self.settings = QSettings("OpenCodeApp", "AccountManager")
         self.init_ui()
+        self.load_settings()
         self.load_table_data()
 
     def init_ui(self):
         self.setWindowTitle("JSON Account Manager (PyQt6)")
-        self.resize(1000, 600)
+        self.resize(1000, 650)
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
+
+        # ------------------------------------------
+        # BAGIAN ATAS: PENGATURAN FOLDER OPENCODE CONFIG
+        # ------------------------------------------
+        config_layout = QHBoxLayout()
+        label_folder = QLabel("<b>Folder OpenCode Config:</b>")
+        self.txt_folder_path = QLineEdit()
+        self.txt_folder_path.setReadOnly(True)
+        self.txt_folder_path.setPlaceholderText("Belum ada folder yang dipilih...")
+
+        btn_browse = QPushButton("Pilih Folder...")
+        btn_browse.setStyleSheet("padding: 4px 10px;")
+        btn_browse.clicked.connect(self.select_opencode_folder)
+
+        config_layout.addWidget(label_folder)
+        config_layout.addWidget(self.txt_folder_path)
+        config_layout.addWidget(btn_browse)
+        main_layout.addLayout(config_layout)
+
+        # Splitter untuk Input JSON dan Tabel
         splitter = QSplitter(Qt.Orientation.Vertical)
 
         # ------------------------------------------
-        # BAGIAN ATAS: INPUT JSON
+        # BAGIAN TENGAH: INPUT JSON
         # ------------------------------------------
         top_widget = QWidget()
         top_layout = QVBoxLayout(top_widget)
-        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setContentsMargins(0, 5, 0, 0)
 
         label_input = QLabel("<b>Paste JSON Akun di Sini:</b>")
         self.json_input = QTextEdit()
@@ -79,24 +98,44 @@ class MainWindow(QMainWindow):
         # ------------------------------------------
         bottom_widget = QWidget()
         bottom_layout = QVBoxLayout(bottom_widget)
-        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setContentsMargins(0, 5, 0, 0)
 
-        label_table = QLabel("<b>Daftar Akun:</b>")
+        label_table = QLabel("<b>Daftar Akun:</b> (Klik kanan pada baris untuk menu aksi)")
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
+        self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels([
-            "Email", "Flash Reset Time", "Pro Reset Time", "Claude Reset Time", "Aksi"
+            "Email", "Flash Reset Time", "Pro Reset Time", "Claude Reset Time"
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        
+        # Aktifkan Custom Context Menu (Klik Kanan)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_context_menu)
 
         bottom_layout.addWidget(label_table)
         bottom_layout.addWidget(self.table)
 
         splitter.addWidget(top_widget)
         splitter.addWidget(bottom_widget)
-        splitter.setSizes([180, 420])
+        splitter.setSizes([160, 440])
 
         main_layout.addWidget(splitter)
+
+    def select_opencode_folder(self):
+        """Membuka dialog pemilih folder dan menyimpannya di QSettings."""
+        current_dir = self.txt_folder_path.text() or ""
+        folder = QFileDialog.getExistingDirectory(self, "Pilih Folder OpenCode Config", current_dir)
+        if folder:
+            self.txt_folder_path.setText(folder)
+            self.settings.setValue("opencode_folder", folder)
+
+    def load_settings(self):
+        """Memuat folder yang tersimpan dari QSettings."""
+        saved_folder = self.settings.value("opencode_folder", "")
+        if saved_folder:
+            self.txt_folder_path.setText(saved_folder)
 
     def process_json(self):
         """Handler saat menyimpan JSON baru."""
@@ -124,25 +163,40 @@ class MainWindow(QMainWindow):
             acc_id, email, flash_reset, pro_reset, claude_reset = row_data
             self.table.insertRow(row_idx)
 
-            # Kolom Email
-            self.table.setItem(row_idx, 0, QTableWidgetItem(email or "-"))
+            item_email = QTableWidgetItem(email or "-")
+            # Simpan account_id di UserRole item email agar bisa diambil saat klik kanan
+            item_email.setData(Qt.ItemDataRole.UserRole, acc_id)
 
-            # Kolom Reset Times (Menggunakan format_human_time)
+            self.table.setItem(row_idx, 0, item_email)
             self.table.setItem(row_idx, 1, QTableWidgetItem(format_human_time(flash_reset)))
             self.table.setItem(row_idx, 2, QTableWidgetItem(format_human_time(pro_reset)))
             self.table.setItem(row_idx, 3, QTableWidgetItem(format_human_time(claude_reset)))
 
-            # Format rata tengah teks kolom
             for c in range(4):
                 item = self.table.item(row_idx, c)
                 if item:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            # Tombol Copy JSON
-            btn_copy = QPushButton("Copy JSON")
-            btn_copy.setStyleSheet("background-color: #4CAF50; color: white; padding: 3px 8px; border-radius: 3px;")
-            btn_copy.clicked.connect(lambda _, aid=acc_id: self.copy_account_json(aid))
-            self.table.setCellWidget(row_idx, 4, btn_copy)
+    def show_context_menu(self, pos):
+        """Menampilkan menu konteks saat pengguna klik kanan pada baris tabel."""
+        item = self.table.itemAt(pos)
+        if not item:
+            return
+
+        row = item.row()
+        account_id = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        email = self.table.item(row, 0).text()
+
+        menu = QMenu(self)
+        action_copy = menu.addAction("📋 Copy JSON")
+        action_update = menu.addAction("🔄 Update ke antigravity-accounts.json")
+
+        # Eksekusi menu
+        chosen_action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen_action == action_copy:
+            self.copy_account_json(account_id)
+        elif chosen_action == action_update:
+            self.update_antigravity_file(account_id, email)
 
     def copy_account_json(self, account_id):
         """Merekonstruksi JSON asli dari database lalu menyalinnya ke Clipboard."""
@@ -152,3 +206,53 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Disalin!", "Format JSON utuh berhasil disalin ke clipboard!")
         else:
             QMessageBox.warning(self, "Gagal", "Gagal mengembalikan format JSON dari database.")
+
+    def update_antigravity_file(self, account_id, email):
+        """Memperbarui file antigravity-accounts.json di folder config yang dipilih."""
+        folder_path = self.txt_folder_path.text().strip()
+
+        # Validasi 1: Folder belum dipilih
+        if not folder_path or not os.path.exists(folder_path):
+            QMessageBox.warning(
+                self, 
+                "Folder Tidak Valid", 
+                "Silakan pilih folder OpenCode Config terlebih dahulu pada bagian atas!"
+            )
+            return
+
+        target_file = os.path.join(folder_path, "antigravity-accounts.json")
+
+        # Validasi 2: Peringatan jika file target tidak ditemukan
+        if not os.path.exists(target_file):
+            QMessageBox.warning(
+                self,
+                "File Tidak Ditemukan",
+                f"File target <b>antigravity-accounts.json</b> tidak ditemukan di folder:\n{folder_path}"
+            )
+            return
+
+        # Konfirmasi Pengguna
+        confirm = QMessageBox.question(
+            self,
+            "Konfirmasi Update File",
+            f"Apakah Anda yakin ingin menimpa isi file:\n<b>{target_file}</b>\n\ndengan data akun untuk <b>{email}</b>?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if confirm == QMessageBox.StandardButton.Yes:
+            json_str = self.db.reconstruct_json_by_id(account_id)
+            if not json_str:
+                QMessageBox.critical(self, "Error", "Gagal mengambil data akun dari database.")
+                return
+
+            try:
+                with open(target_file, "w", encoding="utf-8") as f:
+                    f.write(json_str)
+                QMessageBox.information(
+                    self,
+                    "Berhasil",
+                    f"File <b>antigravity-accounts.json</b> berhasil diperbarui dengan akun:\n{email}"
+                )
+            except Exception as e:
+                QMessageBox.critical(self, "Gagal Menulis File", f"Terjadi kesalahan saat menulis file:\n\n{str(e)}")
