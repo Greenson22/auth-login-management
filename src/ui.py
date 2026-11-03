@@ -1,12 +1,36 @@
 import json
+from datetime import datetime
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QPushButton, QTableWidget, QTableWidgetItem, QLabel,
     QHeaderView, QMessageBox, QSplitter
 )
 from PyQt6.QtCore import Qt
-
 from src.database import AccountDatabase
+
+
+def format_human_time(time_str):
+    """Mengubah timestamp/ISO string menjadi format tanggal manusia yang mudah dibaca."""
+    if not time_str or time_str == "-":
+        return "-"
+    
+    try:
+        # Jika format berupa angka/timestamp Unix (detik atau milidetik)
+        if str(time_str).isdigit() or isinstance(time_str, (int, float)):
+            ts = float(time_str)
+            if ts > 1e11:  # Milidetik
+                ts /= 1000.0
+            dt = datetime.fromtimestamp(ts)
+        else:
+            # Jika format ISO String (misal: "2026-11-04T05:30:00Z" atau "2026-11-04T05:30:00")
+            clean_str = time_str.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(clean_str)
+            
+        # Format tampilan: "04 Nov 2026, 12:30"
+        return dt.strftime("%d %b %Y, %H:%M")
+    except Exception:
+        # Jika terjadi kesalahan parsing, tampilkan teks aslinya
+        return str(time_str)
 
 
 class MainWindow(QMainWindow):
@@ -19,11 +43,9 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         self.setWindowTitle("JSON Account Manager (PyQt6)")
         self.resize(1000, 600)
-
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
-
         splitter = QSplitter(Qt.Orientation.Vertical)
 
         # ------------------------------------------
@@ -100,16 +122,15 @@ class MainWindow(QMainWindow):
 
         for row_idx, row_data in enumerate(rows):
             acc_id, email, flash_reset, pro_reset, claude_reset = row_data
-
             self.table.insertRow(row_idx)
-            
+
             # Kolom Email
             self.table.setItem(row_idx, 0, QTableWidgetItem(email or "-"))
-            
-            # Kolom Reset Times
-            self.table.setItem(row_idx, 1, QTableWidgetItem(flash_reset or "-"))
-            self.table.setItem(row_idx, 2, QTableWidgetItem(pro_reset or "-"))
-            self.table.setItem(row_idx, 3, QTableWidgetItem(claude_reset or "-"))
+
+            # Kolom Reset Times (Menggunakan format_human_time)
+            self.table.setItem(row_idx, 1, QTableWidgetItem(format_human_time(flash_reset)))
+            self.table.setItem(row_idx, 2, QTableWidgetItem(format_human_time(pro_reset)))
+            self.table.setItem(row_idx, 3, QTableWidgetItem(format_human_time(claude_reset)))
 
             # Format rata tengah teks kolom
             for c in range(4):
