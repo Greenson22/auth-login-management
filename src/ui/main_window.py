@@ -54,7 +54,6 @@ class MainWindow(QMainWindow):
     main_layout.addWidget(splitter)
 
     # Menghubungkan sinyal-sinyal komponen
-    self.config_bar.folder_changed.connect(self._on_folder_changed)
     self.config_bar.settings_requested.connect(self.open_settings_dialog)
     self.json_input.json_submitted.connect(self.process_json)
 
@@ -84,21 +83,15 @@ class MainWindow(QMainWindow):
     if dialog.exec() == SettingsDialog.DialogCode.Accepted:
       # Muat ulang folder di UI dari pengaturan terbaru
       folder = self.settings.value("antigravity_folder", "") or self.settings.value("opencode_folder", "")
-      if folder:
-        self.config_bar.set_folder_path(folder)
+      self.config_bar.set_folder_path(folder)
 
   def load_settings(self):
     """Memuat folder dan preferensi sorting yang tersimpan dari QSettings."""
     saved_folder = self.settings.value("antigravity_folder", "") or self.settings.value("opencode_folder", "")
-    if saved_folder:
-      self.config_bar.set_folder_path(saved_folder)
+    self.config_bar.set_folder_path(saved_folder)
 
     saved_sort = self.settings.value("sort_mode_index", 0, type=int)
     self.account_table.set_sort_index(saved_sort)
-
-  def _on_folder_changed(self, folder: str):
-    self.settings.setValue("antigravity_folder", folder)
-    self.settings.setValue("opencode_folder", folder)
 
   def _on_sort_mode_changed(self, index: int):
     self.settings.setValue("sort_mode_index", index)
