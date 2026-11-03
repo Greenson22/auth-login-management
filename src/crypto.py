@@ -74,6 +74,28 @@ def decrypt_aes256(encrypted_base64: str, password: str) -> str:
   return plaintext.decode("utf-8")
 
 
+ENC_CANARY_VALUE = "AUTH_ENCRYPT_VALID_KEY_OK"
+
+
+def create_encryption_canary(password: str) -> str:
+  """Membuat canary encrypted string dengan kata tetap untuk verifikasi password enkripsi."""
+  return encrypt_aes256(ENC_CANARY_VALUE, password)
+
+
+def verify_encryption_canary(encrypted_canary: str, password: str) -> bool:
+  """Mengecek apakah kata rahasia canary berhasil didekripsi dengan password yang diberikan.
+
+  Mengembalikan True jika dekripsi berhasil dan teks hasil dekripsi cocok dengan kata tetap.
+  """
+  if not encrypted_canary or not password:
+    return False
+  try:
+    decrypted = decrypt_aes256(encrypted_canary, password)
+    return decrypted == ENC_CANARY_VALUE
+  except Exception:
+    return False
+
+
 def encrypt_value(val, password: str) -> str:
   """Mengonversi nilai (str, int, float, bool, dict, list) ke JSON string lalu dienkripsi dengan AES-256."""
   if val is None or val == "":

@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -33,6 +34,7 @@ class SettingsDialog(QDialog):
     self._password_already_saved = False
     self._turso_url_already_saved = False
     self._turso_token_already_saved = False
+    self._is_loading = True
     self.init_ui()
     self.load_settings()
 
@@ -242,14 +244,132 @@ class SettingsDialog(QDialog):
 
   # ─── Slot toggle & interaksi ───
 
-  def _on_crypto_toggled(self, checked: bool):
-    """Mengaktifkan/menonaktifkan form input password enkripsi sesuai status checkbox."""
-    self.crypto_form_widget.setEnabled(checked)
-    self.btn_decrypt_db.setEnabled(checked)
-    if checked and self._password_already_saved:
-      self.lbl_password_info.setVisible(True)
+  def _update_crypto_field_lock_state(self):
+    """Mengatur status kunci (read-only) pada field password sesuai status centang enkripsi."""
+    is_enc_enabled = self.chk_enable_crypto.isChecked()
+
+    if is_enc_enabled:
+      self.crypto_form_widget.setEnabled(True)
+      self.btn_decrypt_db.setEnabled(True)
+      if self._password_already_saved:
+        # Jika enkripsi aktif dan password sudah tersimpan, kunci field password agar tidak bisa diisi
+        self.txt_password.setReadOnly(True)
+        self.txt_confirm_password.setReadOnly(True)
+        self.txt_password.clear()
+        self.txt_confirm_password.clear()
+        self.txt_password.setPlaceholderText("🔒 Terkunci: Nonaktifkan centang untuk mengubah password")
+        self.txt_confirm_password.setPlaceholderText("🔒 Terkunci: Nonaktifkan centang untuk mengubah password")
+        self.txt_password.setStyleSheet(
+            "QLineEdit { background-color: rgba(128, 128, 128, 0.12); color: #777; }"
+        )
+        self.txt_confirm_password.setStyleSheet(
+            "QLineEdit { background-color: rgba(128, 128, 128, 0.12); color: #777; }"
+        )
+        self.lbl_password_info.setText(
+            "🔒 <b>Password Enkripsi Terkunci:</b> Enkripsi AES-256 aktif. "
+            "Untuk mencegah korupsi data, field password tidak dapat diisi/diubah secara langsung. "
+            "Nonaktifkan centang di atas jika ingin mengubah konfigurasi."
+        )
+        self.lbl_password_info.setVisible(True)
+      else:
+        self.txt_password.setReadOnly(False)
+        self.txt_confirm_password.setReadOnly(False)
+        self.txt_password.setStyleSheet("")
+        self.txt_confirm_password.setStyleSheet("")
+        self.txt_password.setPlaceholderText("Masukkan password master enkripsi...")
+        self.txt_confirm_password.setPlaceholderText("Ulangi konfirmasi password master...")
+        self.lbl_password_info.setVisible(False)
     else:
+      # Centang nonaktif: field password bisa diisi untuk mengatur password baru jika ingin mengaktifkan nanti
+      self.crypto_form_widget.setEnabled(True)
+      self.btn_decrypt_db.setEnabled(True)
+      self.txt_password.setReadOnly(False)
+      self.txt_confirm_password.setReadOnly(False)
+      self.txt_password.setStyleSheet("")
+      self.txt_confirm_password.setStyleSheet("")
+      self.txt_password.setPlaceholderText("Masukkan password jika ingin mengaktifkan nanti...")
+      self.txt_confirm_password.setPlaceholderText("Ulangi konfirmasi password master...")
       self.lbl_password_info.setVisible(False)
+
+  def _on_crypto_toggled(self, checked: bool):
+    """Menangani aktivasi dan deaktivasi enkripsi dengan konfirmasi ketat dan verifikasi password."""
+    if self._is_loading:
+      self._update_crypto_field_lock_state()
+      return
+
+    if checked:
+      # User ingin mengaktifkan enkripsi
+      confirm = QMessageBox.warning(
+          self,
+          "Konfirmasi Mengaktifkan Enkripsi",
+          "<b>PERHATIAN: Mengaktifkan Enkripsi Akun (AES-256)</b><br><br>"
+          "Data akun baru yang dimasukkan via Paste JSON akan disimpan dalam kondisi <b>terenkripsi penuh</b>.<br><br>"
+          "⚠️ <b>Penting:</b> Pastikan Anda mengingat atau mencatat password enkripsi ini.<br>"
+          "Jika password hilang atau lupa, data tidak akan bisa didekripsi atau dipulihkan kembali!<br><br>"
+          "Apakah Anda yakin ingin mengaktifkan enkripsi?",
+          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+          QMessageBox.StandardButton.No,
+      )
+      if confirm != QMessageBox.StandardButton.Yes:
+        self.chk_enable_crypto.blockSignals(True)
+        self.chk_enable_crypto.setChecked(False)
+        self.chk_enable_crypto.blockSignals(False)
+        self._update_crypto_field_lock_state()
+        return
+
+      self._update_crypto_field_lock_state()
+
+    else:
+      # User ingin menonaktifkan enkripsi (beralih ke plaintext)
+      saved_password = self.settings.value("aes256_password", "")
+      if saved_password:
+        entered_pwd, ok = QInputDialog.getText(
+            self,
+            "Verifikasi Password Enkripsi",
+            "Masukkan password enkripsi saat ini untuk menonaktifkan enkripsi:\n"
+            "(Diperlukan demi mencegah korupsi data)",
+            QLineEdit.EchoMode.Password,
+            "",
+        )
+        if not ok or not entered_pwd:
+          # Batal dinonaktifkan
+          self.chk_enable_crypto.blockSignals(True)
+          self.chk_enable_crypto.setChecked(True)
+          self.chk_enable_crypto.blockSignals(False)
+          return
+
+        if entered_pwd != saved_password:
+          QMessageBox.critical(
+              self,
+              "Password Salah",
+              "<b>Password enkripsi yang dimasukkan salah!</b><br><br>"
+              "Centang enkripsi tidak dapat dinonaktifkan demi menjaga keutuhan data.",
+          )
+          self.chk_enable_crypto.blockSignals(True)
+          self.chk_enable_crypto.setChecked(True)
+          self.chk_enable_crypto.blockSignals(False)
+          return
+
+      # Tampilkan peringatan konfirmasi bahaya data korup
+      confirm = QMessageBox.warning(
+          self,
+          "Peringatan Menonaktifkan Enkripsi",
+          "<b>PERHATIAN: Anda akan menonaktifkan enkripsi akun!</b><br><br>"
+          "• Data akun baru yang dimasukkan setelah ini akan disimpan sebagai <b>PLAINTEXT</b>.<br>"
+          "• <b>Penting:</b> Data yang sudah terenkripsi di database <b>TIDAK</b> otomatis menjadi plaintext "
+          "kecuali Anda memilih <i>'Hapus Enkripsi dari Database'</i>.<br>"
+          "• Mengabaikan hal ini dapat memicu ketidakkonsistenan data (corrupt data).<br><br>"
+          "Apakah Anda yakin ingin melanjutkan menonaktifkan enkripsi?",
+          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+          QMessageBox.StandardButton.No,
+      )
+      if confirm != QMessageBox.StandardButton.Yes:
+        self.chk_enable_crypto.blockSignals(True)
+        self.chk_enable_crypto.setChecked(True)
+        self.chk_enable_crypto.blockSignals(False)
+        return
+
+      self._update_crypto_field_lock_state()
 
   def _on_turso_toggled(self, checked: bool):
     """Mengaktifkan/menonaktifkan input Turso sesuai status checkbox."""
@@ -348,18 +468,26 @@ class SettingsDialog(QDialog):
       )
 
   def _decrypt_all_in_db(self):
-    """Mendekripsi semua akun terenkripsi di database menggunakan password saat ini."""
-    # Ambil password aktif: dari field jika diubah, atau dari QSettings jika masih placeholder
-    if self._password_already_saved and not self.txt_password.text():
-      current_password = self.settings.value("aes256_password", "")
-    else:
-      current_password = self.txt_password.text()
+    """Mendekripsi semua akun terenkripsi di database menjadi plaintext setelah verifikasi password."""
+    saved_password = self.settings.value("aes256_password", "")
 
-    if not current_password:
-      QMessageBox.warning(
+    # Pengguna wajib memasukkan password enkripsi terlebih dahulu
+    entered_password, ok = QInputDialog.getText(
+        self,
+        "Verifikasi Password Dekripsi",
+        "Masukkan password enkripsi akun untuk mendekripsi semua data di database:",
+        QLineEdit.EchoMode.Password,
+        "",
+    )
+    if not ok or not entered_password:
+      return
+
+    if saved_password and entered_password != saved_password:
+      QMessageBox.critical(
           self,
-          "Password Belum Diatur",
-          "Password enkripsi belum tersedia. Harap isi password enkripsi terlebih dahulu.",
+          "Password Salah",
+          "<b>Password enkripsi yang dimasukkan salah!</b><br><br>"
+          "Operasi dekripsi dibatalkan demi keamanan agar data tidak korup.",
       )
       return
 
@@ -367,8 +495,9 @@ class SettingsDialog(QDialog):
         self,
         "Konfirmasi Hapus Enkripsi",
         "<b>Hapus enkripsi dari semua akun di database?</b><br><br>"
-        "Seluruh data akun yang terenkripsi akan didekripsi dan disimpan kembali sebagai <b>plaintext</b>.<br><br>"
-        "Lakukan ini sebelum mengganti password enkripsi.",
+        "Seluruh data akun yang terenkripsi akan didekripsi menggunakan password yang dimasukkan "
+        "dan disimpan kembali sebagai <b>plaintext</b>.<br><br>"
+        "Apakah Anda yakin ingin melanjutkan?",
         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         QMessageBox.StandardButton.No,
     )
@@ -395,13 +524,13 @@ class SettingsDialog(QDialog):
           turso_url=turso_url,
           turso_token=turso_token,
       )
-      count = db.decrypt_all_accounts(current_password)
+      count = db.decrypt_all_accounts(entered_password)
       QMessageBox.information(
           self,
           "Enkripsi Dihapus",
           f"Berhasil mendekripsi <b>{count}</b> akun dari database.<br><br>"
           "Semua data akun kini tersimpan sebagai <b>plaintext</b>.<br>"
-          "Anda sekarang dapat mengganti password enkripsi.",
+          "Anda sekarang dapat mengganti password enkripsi dengan aman.",
       )
     except Exception as e:
       QMessageBox.critical(
@@ -413,10 +542,15 @@ class SettingsDialog(QDialog):
   # ─── Load & Save Settings ───
 
   def load_settings(self):
+    self._is_loading = True
     folder = self.settings.value("antigravity_folder", "")
     if not folder:
       folder = self.settings.value("opencode_folder", "")
     self.txt_folder_path.setText(folder)
+
+    # Password tersimpan check
+    saved_password = self.settings.value("aes256_password", "")
+    self._password_already_saved = bool(saved_password)
 
     # Enkripsi
     enable_crypto_val = self.settings.value("enable_encryption", False)
@@ -426,17 +560,7 @@ class SettingsDialog(QDialog):
       enable_crypto = bool(enable_crypto_val)
 
     self.chk_enable_crypto.setChecked(enable_crypto)
-    self._on_crypto_toggled(enable_crypto)
-
-    # Jika ada password tersimpan, tampilkan placeholder — jangan isi field dengan nilai asli
-    saved_password = self.settings.value("aes256_password", "")
-    if saved_password:
-      self._password_already_saved = True
-      # Field dikosongkan; label info akan tampil via _on_crypto_toggled
-      if enable_crypto:
-        self.lbl_password_info.setVisible(True)
-    else:
-      self._password_already_saved = False
+    self._update_crypto_field_lock_state()
 
     # Turso
     use_turso_val = self.settings.value("use_turso", False)
@@ -451,7 +575,6 @@ class SettingsDialog(QDialog):
     saved_url = self.settings.value("turso_url", "")
     if saved_url:
       self._turso_url_already_saved = True
-      # Tampilkan indikasi bahwa URL sudah tersimpan (bukan nilai aslinya)
       self.txt_turso_url.setPlaceholderText("✔ URL sudah tersimpan — klik Ubah untuk mengganti")
       self.txt_turso_url.setReadOnly(True)
       self.txt_turso_url.setStyleSheet(
@@ -472,6 +595,7 @@ class SettingsDialog(QDialog):
       self._turso_token_already_saved = False
 
     self._on_turso_toggled(use_turso)
+    self._is_loading = False
 
   def _save_settings(self):
     folder = self.txt_folder_path.text().strip()

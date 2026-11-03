@@ -1,5 +1,5 @@
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor
+from PyQt6.QtGui import QBrush, QColor, QFont
 from PyQt6.QtWidgets import (
     QComboBox,
     QHeaderView,
@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from src.crypto import verify_encryption_canary
 from src.ui.utils import parse_quota_info
 
 
@@ -27,6 +28,7 @@ class AccountTableWidget(QWidget):
   def __init__(self, parent=None):
     super().__init__(parent)
     self._raw_account_rows = []
+    self._current_password = ""
     self.init_ui()
 
   def init_ui(self):
@@ -61,9 +63,10 @@ class AccountTableWidget(QWidget):
 
     # Tabel Akun
     self.table = QTableWidget()
-    self.table.setColumnCount(4)
+    self.table.setColumnCount(5)
     self.table.setHorizontalHeaderLabels([
         "Email",
+        "Status Enkripsi",
         "Flash Quota (Reset)",
         "Pro Quota (Reset)",
         "Claude Quota (Reset)",
@@ -90,25 +93,58 @@ class AccountTableWidget(QWidget):
     if 0 <= index < self.cmb_sort_mode.count():
       self.cmb_sort_mode.setCurrentIndex(index)
 
-  def set_accounts_data(self, rows):
+  def set_accounts_data(self, rows, current_password: str = ""):
     """Menyimpan data mentah dari fetch_accounts_summary() dan memperbarui tampilan."""
     self._raw_account_rows = rows
+    self._current_password = current_password
     self._render_table()
 
   def _render_table(self):
     parsed_list = []
 
     for row_data in self._raw_account_rows:
-      (
-          acc_id,
-          email,
-          flash_reset,
-          flash_frac,
-          pro_reset,
-          pro_frac,
-          claude_reset,
-          claude_frac,
-      ) = row_data
+      acc_id = row_data[0]
+      email = row_data[1]
+      flash_reset = row_data[2]
+      flash_frac = row_data[3]
+      pro_reset = row_data[4]
+      pro_frac = row_data[5]
+      claude_reset = row_data[6]
+      claude_frac = row_data[7]
+      is_enc = bool(row_data[8]) if len(row_data) > 8 else False
+      enc_check = row_data[9] if len(row_data) > 9 else None
+
+      # Evaluasi status enkripsi dan validasi password
+      if not is_enc:
+        enc_status_text = "🔓 Plaintext"
+        enc_status_color = "#5f6368"
+        enc_status_tooltip = "Akun tersimpan dalam kondisi plaintext (tidak dienkripsi)."
+      else:
+        if not self._current_password:
+          enc_status_text = "🔒 Terkunci"
+          enc_status_color = "#e37400"
+          enc_status_tooltip = (
+              "Akun terenkripsi AES-256. Atur/masukkan password enkripsi di Pengaturan untuk membuka."
+          )
+        else:
+          if enc_check:
+            is_valid = verify_encryption_canary(enc_check, self._current_password)
+            if is_valid:
+              enc_status_text = "🟢 Enkripsi Valid"
+              enc_status_color = "#137333"
+              enc_status_tooltip = (
+                  "Kata verifikasi canary cocok! Password enkripsi benar dan data valid."
+              )
+            else:
+              enc_status_text = "🔴 Password Salah"
+              enc_status_color = "#c5221f"
+              enc_status_tooltip = (
+                  "Gagal mendekripsi kata verifikasi canary! Password enkripsi salah atau data korup."
+              )
+          else:
+            enc_status_text = "🔒 Terenkripsi (Lama)"
+            enc_status_color = "#1a73e8"
+            enc_status_tooltip = "Akun terenkripsi AES-256 (format data sebelum verifikasi canary)."
 
       p_flash = parse_quota_info(flash_frac, flash_reset)
       p_pro = parse_quota_info(pro_frac, pro_reset)
@@ -119,6 +155,9 @@ class AccountTableWidget(QWidget):
       parsed_list.append({
           "acc_id": acc_id,
           "email": email or "-",
+          "enc_status_text": enc_status_text,
+          "enc_status_color": enc_status_color,
+          "enc_status_tooltip": enc_status_tooltip,
           "flash": p_flash,
           "pro": p_pro,
           "claude": p_claude,
@@ -183,6 +222,13 @@ class AccountTableWidget(QWidget):
       item_email = QTableWidgetItem(item_data["email"])
       item_email.setData(Qt.ItemDataRole.UserRole, item_data["acc_id"])
 
+      item_enc_status = QTableWidgetItem(item_data["enc_status_text"])
+      item_enc_status.setForeground(QBrush(QColor(item_data["enc_status_color"])))
+      item_enc_status.setToolTip(item_data["enc_status_tooltip"])
+      font_status = item_enc_status.font()
+      font_status.setBold(True)
+      item_enc_status.setFont(font_status)
+
       item_flash = QTableWidgetItem(p_flash[0])
       item_flash.setForeground(QBrush(QColor(p_flash[2])))
 
@@ -192,7 +238,7 @@ class AccountTableWidget(QWidget):
       item_claude = QTableWidgetItem(p_claude[0])
       item_claude.setForeground(QBrush(QColor(p_claude[2])))
 
-      items = [item_email, item_flash, item_pro, item_claude]
+      items = [item_email, item_enc_status, item_flash, item_pro, item_claude]
 
       for c, item in enumerate(items):
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)

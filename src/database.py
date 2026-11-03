@@ -1,7 +1,14 @@
 import json
 import sqlite3
 from typing import Optional
-from src.crypto import decrypt_aes256, encrypt_aes256, decrypt_value, encrypt_value
+from src.crypto import (
+    create_encryption_canary,
+    decrypt_aes256,
+    decrypt_value,
+    encrypt_aes256,
+    encrypt_value,
+    verify_encryption_canary,
+)
 from src.turso_client import TursoClient
 
 
@@ -47,6 +54,7 @@ class AccountDatabase:
             cached_quota_updated_at INTEGER,
             rate_limit_reset_times TEXT,
             is_encrypted INTEGER NOT NULL DEFAULT 0,
+            enc_check TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """
@@ -85,13 +93,17 @@ class AccountDatabase:
             (create_fingerprints_sql, None),
             (create_quotas_sql, None),
         ])
-        # Migrasi kolom is_encrypted & rate_limit_reset_times bila tabel sudah ada sebelumnya
+        # Migrasi kolom is_encrypted, rate_limit_reset_times & enc_check bila tabel sudah ada sebelumnya
         try:
           self.turso_client.execute("ALTER TABLE accounts ADD COLUMN is_encrypted INTEGER NOT NULL DEFAULT 0")
         except Exception:
           pass
         try:
           self.turso_client.execute("ALTER TABLE accounts ADD COLUMN rate_limit_reset_times TEXT")
+        except Exception:
+          pass
+        try:
+          self.turso_client.execute("ALTER TABLE accounts ADD COLUMN enc_check TEXT")
         except Exception:
           pass
       except Exception:
@@ -110,6 +122,8 @@ class AccountDatabase:
           cursor.execute("ALTER TABLE accounts ADD COLUMN is_encrypted INTEGER NOT NULL DEFAULT 0;")
         if "rate_limit_reset_times" not in columns:
           cursor.execute("ALTER TABLE accounts ADD COLUMN rate_limit_reset_times TEXT;")
+        if "enc_check" not in columns:
+          cursor.execute("ALTER TABLE accounts ADD COLUMN enc_check TEXT;")
         conn.commit()
 
   def _prepare_account_record(self, acc: dict, encrypt: bool, password: str):
@@ -132,6 +146,7 @@ class AccountDatabase:
       stored_last_used = encrypt_value(acc.get("lastUsed"), password)
       stored_cached_quota_updated_at = encrypt_value(acc.get("cachedQuotaUpdatedAt"), password)
       stored_rate_limit_reset_times = encrypt_value(acc.get("rateLimitResetTimes", {}), password)
+      stored_enc_check = create_encryption_canary(password)
     else:
       stored_rt = acc.get("refreshToken", "")
       stored_project_id = acc.get("projectId")
@@ -142,6 +157,7 @@ class AccountDatabase:
       stored_last_used = acc.get("lastUsed")
       stored_cached_quota_updated_at = acc.get("cachedQuotaUpdatedAt")
       stored_rate_limit_reset_times = json.dumps(acc.get("rateLimitResetTimes", {}))
+      stored_enc_check = None
 
     args_acc = [
         acc_id,
@@ -156,6 +172,7 @@ class AccountDatabase:
         stored_cached_quota_updated_at,
         stored_rate_limit_reset_times,
         is_encrypted_val,
+        stored_enc_check,
     ]
 
     fp = acc.get("fingerprint", {}) or {}
@@ -235,8 +252,8 @@ class AccountDatabase:
         INSERT INTO accounts (
             id, email, refresh_token, project_id, managed_project_id,
             enabled, verification_required, added_at, last_used, cached_quota_updated_at,
-            rate_limit_reset_times, is_encrypted
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            rate_limit_reset_times, is_encrypted, enc_check
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             email=excluded.email,
             refresh_token=excluded.refresh_token,
@@ -248,7 +265,8 @@ class AccountDatabase:
             last_used=excluded.last_used,
             cached_quota_updated_at=excluded.cached_quota_updated_at,
             rate_limit_reset_times=excluded.rate_limit_reset_times,
-            is_encrypted=excluded.is_encrypted
+            is_encrypted=excluded.is_encrypted,
+            enc_check=excluded.enc_check
     """
     sql_fp = """
         INSERT INTO account_fingerprints (
@@ -322,22 +340,34 @@ class AccountDatabase:
     if not password:
       raise ValueError("Password enkripsi tidak boleh kosong.")
 
-    # Ambil semua akun yang terenkripsi
-    query_ids = "SELECT id FROM accounts WHERE is_encrypted = 1"
+    # Ambil semua akun yang terenkripsi dan canary-nya jika ada
+    query_accs = "SELECT id, enc_check FROM accounts WHERE is_encrypted = 1"
 
     if self.use_turso and self.turso_client:
-      id_rows, _ = self.turso_client.execute(query_ids)
-      account_ids = [r[0] for r in id_rows] if id_rows else []
+      rows, _ = self.turso_client.execute(query_accs)
+      enc_accounts = rows if rows else []
     else:
       with self.get_connection() as conn:
         cursor = conn.cursor()
-        account_ids = [r[0] for r in cursor.execute(query_ids).fetchall()]
+        enc_accounts = cursor.execute(query_accs).fetchall()
 
-    if not account_ids:
+    if not enc_accounts:
       return 0
 
+    # Lakukan validasi password terlebih dahulu terhadap canary yang tersedia
+    for _, enc_check in enc_accounts:
+      if enc_check:
+        if not verify_encryption_canary(enc_check, password):
+          raise ValueError(
+              "Password enkripsi yang dimasukkan salah!\n\n"
+              "Operasi dekripsi dibatalkan agar data tidak korup."
+          )
+        # Jika satu canary berhasil diverifikasi, password dipastikan benar
+        break
+
     count = 0
-    for acc_id in account_ids:
+    for row in enc_accounts:
+      acc_id = row[0]
       try:
         # Rekonstruksi JSON menggunakan password yang ada
         json_str = self.reconstruct_json_by_id(acc_id, password=password)
@@ -379,7 +409,7 @@ class AccountDatabase:
         return cursor.rowcount > 0
 
   def fetch_accounts_summary(self):
-    """Mengambil Email, Reset Time, dan Remaining Fraction per model untuk keperluan UI."""
+    """Mengambil Email, Reset Time, Remaining Fraction per model, dan Status Enkripsi untuk keperluan UI."""
     query = """
         SELECT 
             a.id,
@@ -389,7 +419,9 @@ class AccountDatabase:
             MAX(CASE WHEN q.model_name = 'gemini-pro' THEN q.reset_time END) AS pro_reset,
             MAX(CASE WHEN q.model_name = 'gemini-pro' THEN q.remaining_fraction END) AS pro_frac,
             MAX(CASE WHEN q.model_name = 'claude' THEN q.reset_time END) AS claude_reset,
-            MAX(CASE WHEN q.model_name = 'claude' THEN q.remaining_fraction END) AS claude_frac
+            MAX(CASE WHEN q.model_name = 'claude' THEN q.remaining_fraction END) AS claude_frac,
+            a.is_encrypted,
+            a.enc_check
         FROM accounts a
         LEFT JOIN account_quotas q ON a.id = q.account_id
         GROUP BY a.id
@@ -412,7 +444,7 @@ class AccountDatabase:
     query_acc = """
         SELECT id, refresh_token, project_id, email, enabled, added_at,
                 last_used, verification_required, managed_project_id, cached_quota_updated_at,
-                is_encrypted, rate_limit_reset_times
+                is_encrypted, rate_limit_reset_times, enc_check
         FROM accounts WHERE id = ?
     """
     query_fp = """
@@ -445,11 +477,16 @@ class AccountDatabase:
         quota_rows = cursor.execute(query_quotas, (account_id,)).fetchall()
 
     is_encrypted = bool(acc_row[10]) if len(acc_row) > 10 and acc_row[10] else False
+    enc_check = acc_row[12] if len(acc_row) > 12 else None
 
     if is_encrypted:
       if not password:
         raise ValueError(
             "Akun ini terenkripsi. Silakan atur/masukkan password enkripsi di Menu Pengaturan."
+        )
+      if enc_check and not verify_encryption_canary(enc_check, password):
+        raise ValueError(
+            "Password enkripsi salah atau data telah korup. Dekripsi dibatalkan demi keamanan."
         )
       try:
         final_refresh_token = decrypt_value(acc_row[1], password, "", strict=True)

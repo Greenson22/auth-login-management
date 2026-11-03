@@ -186,10 +186,11 @@ class MainWindow(QMainWindow):
       return self.db.fetch_accounts_summary()
 
     def on_success(rows):
-      self.account_table.set_accounts_data(rows or [])
+      current_pwd = self._get_encryption_password()
+      self.account_table.set_accounts_data(rows or [], current_password=current_pwd)
 
     def on_failed(e):
-      self.account_table.set_accounts_data([])
+      self.account_table.set_accounts_data([], current_password="")
       use_turso_val = self.settings.value("use_turso", False)
       use_turso = (
           bool(use_turso_val)
