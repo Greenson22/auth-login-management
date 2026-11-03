@@ -32,7 +32,7 @@ class AccountDatabase:
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-
+            
             # Tabel Fingerprints
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS account_fingerprints (
@@ -48,7 +48,7 @@ class AccountDatabase:
                     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
                 )
             ''')
-
+            
             # Tabel Quotas
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS account_quotas (
@@ -72,7 +72,7 @@ class AccountDatabase:
         accounts = data.get("accounts", [data]) if isinstance(data, dict) and "accounts" in data else data
         if isinstance(accounts, dict):
             accounts = [accounts]
-
+            
         inserted_count = 0
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -81,7 +81,7 @@ class AccountDatabase:
                     continue
                 
                 acc_id = acc.get("id")
-
+                
                 # 1. Upsert Accounts
                 cursor.execute('''
                     INSERT INTO accounts (
@@ -101,7 +101,7 @@ class AccountDatabase:
                     1 if acc.get("verificationRequired", False) else 0,
                     acc.get("addedAt"), acc.get("lastUsed"), acc.get("cachedQuotaUpdatedAt")
                 ))
-
+                
                 # 2. Upsert Fingerprint
                 fp = acc.get("fingerprint", {})
                 cm = fp.get("clientMetadata", {})
@@ -121,7 +121,7 @@ class AccountDatabase:
                     cm.get("ideType"), cm.get("platform"), cm.get("pluginType"),
                     fp.get("createdAt")
                 ))
-
+                
                 # 3. Upsert Quotas
                 quotas = acc.get("cachedQuota", {})
                 for model_name, q in quotas.items():
@@ -146,7 +146,7 @@ class AccountDatabase:
         return inserted_count
 
     def fetch_accounts_summary(self):
-        """Mengambil Email, Reset Time per model, dan ID untuk keperluan UI."""
+        """Mengambil Email, Reset Time, dan Remaining Fraction per model untuk keperluan UI."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             query = '''
@@ -154,8 +154,11 @@ class AccountDatabase:
                     a.id,
                     a.email,
                     MAX(CASE WHEN q.model_name = 'gemini-flash' THEN q.reset_time END) AS flash_reset,
+                    MAX(CASE WHEN q.model_name = 'gemini-flash' THEN q.remaining_fraction END) AS flash_frac,
                     MAX(CASE WHEN q.model_name = 'gemini-pro' THEN q.reset_time END) AS pro_reset,
-                    MAX(CASE WHEN q.model_name = 'claude' THEN q.reset_time END) AS claude_reset
+                    MAX(CASE WHEN q.model_name = 'gemini-pro' THEN q.remaining_fraction END) AS pro_frac,
+                    MAX(CASE WHEN q.model_name = 'claude' THEN q.reset_time END) AS claude_reset,
+                    MAX(CASE WHEN q.model_name = 'claude' THEN q.remaining_fraction END) AS claude_frac
                 FROM accounts a
                 LEFT JOIN account_quotas q ON a.id = q.account_id
                 GROUP BY a.id
@@ -170,27 +173,27 @@ class AccountDatabase:
             
             # Ambil Data Akun
             acc_row = cursor.execute('''
-                SELECT id, refresh_token, project_id, email, enabled, added_at, 
-                       last_used, verification_required, managed_project_id, cached_quota_updated_at
+                SELECT id, refresh_token, project_id, email, enabled, added_at,
+                        last_used, verification_required, managed_project_id, cached_quota_updated_at
                 FROM accounts WHERE id = ?
             ''', (account_id,)).fetchone()
             
             if not acc_row:
                 return None
-
+            
             # Ambil Fingerprint
             fp_row = cursor.execute('''
-                SELECT device_id, session_token, user_agent, api_client, 
-                       ide_type, platform, plugin_type, created_at
+                SELECT device_id, session_token, user_agent, api_client,
+                        ide_type, platform, plugin_type, created_at
                 FROM account_fingerprints WHERE account_id = ?
             ''', (account_id,)).fetchone()
-
+            
             # Ambil Quotas
             quota_rows = cursor.execute('''
                 SELECT model_name, remaining_fraction, reset_time, remaining_fraction_reset_time, model_count
                 FROM account_quotas WHERE account_id = ?
             ''', (account_id,)).fetchall()
-
+            
             # Konstruksi Objek JSON Utuh
             cached_quota = {}
             for q in quota_rows:
@@ -200,7 +203,7 @@ class AccountDatabase:
                     "remainingFractionResetTime": q[3],
                     "modelCount": q[4]
                 }
-
+                
             account_json = {
                 "id": acc_row[0],
                 "refreshToken": acc_row[1],
@@ -228,5 +231,4 @@ class AccountDatabase:
                 "cachedQuota": cached_quota,
                 "cachedQuotaUpdatedAt": acc_row[9]
             }
-
             return json.dumps(account_json, indent=2)

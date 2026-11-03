@@ -10,24 +10,43 @@ from PyQt6.QtCore import Qt, QSettings
 from src.database import AccountDatabase
 
 
-def format_human_time(time_str):
-    """Mengubah timestamp/ISO string menjadi format tanggal manusia yang mudah dibaca."""
-    if not time_str or time_str == "-":
+def format_quota_info(remaining_fraction, reset_time):
+    """
+    Mengformat persentase kuota dan tanggal reset time.
+    Contoh output: "100% (-)" atau "50% (04 Nov 2026, 12:30)"
+    """
+    # 1. Format Persentase Quota
+    if remaining_fraction is None:
+        percentage_str = "-"
+    else:
+        try:
+            percent = int(float(remaining_fraction) * 100)
+            percentage_str = f"{percent}%"
+        except (ValueError, TypeError):
+            percentage_str = "-"
+
+    # 2. Format Reset Time
+    if not reset_time or reset_time == "-":
+        formatted_time = "-"
+    else:
+        try:
+            if str(reset_time).isdigit() or isinstance(reset_time, (int, float)):
+                ts = float(reset_time)
+                if ts > 1e11:  # Milidetik
+                    ts /= 1000.0
+                dt = datetime.fromtimestamp(ts)
+            else:
+                clean_str = reset_time.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(clean_str)
+                
+            formatted_time = dt.strftime("%d %b %Y, %H:%M")
+        except Exception:
+            formatted_time = str(reset_time)
+
+    if percentage_str == "-" and formatted_time == "-":
         return "-"
     
-    try:
-        if str(time_str).isdigit() or isinstance(time_str, (int, float)):
-            ts = float(time_str)
-            if ts > 1e11:  # Milidetik
-                ts /= 1000.0
-            dt = datetime.fromtimestamp(ts)
-        else:
-            clean_str = time_str.replace("Z", "+00:00")
-            dt = datetime.fromisoformat(clean_str)
-            
-        return dt.strftime("%d %b %Y, %H:%M")
-    except Exception:
-        return str(time_str)
+    return f"{percentage_str} ({formatted_time})"
 
 
 class MainWindow(QMainWindow):
@@ -41,7 +60,7 @@ class MainWindow(QMainWindow):
 
     def init_ui(self):
         self.setWindowTitle("JSON Account Manager (PyQt6)")
-        self.resize(1000, 650)
+        self.resize(1050, 650)
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
@@ -104,7 +123,7 @@ class MainWindow(QMainWindow):
         self.table = QTableWidget()
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels([
-            "Email", "Flash Reset Time", "Pro Reset Time", "Claude Reset Time"
+            "Email", "Flash Quota (Reset)", "Pro Quota (Reset)", "Claude Quota (Reset)"
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -160,7 +179,7 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(0)
 
         for row_idx, row_data in enumerate(rows):
-            acc_id, email, flash_reset, pro_reset, claude_reset = row_data
+            acc_id, email, flash_reset, flash_frac, pro_reset, pro_frac, claude_reset, claude_frac = row_data
             self.table.insertRow(row_idx)
 
             item_email = QTableWidgetItem(email or "-")
@@ -168,9 +187,9 @@ class MainWindow(QMainWindow):
             item_email.setData(Qt.ItemDataRole.UserRole, acc_id)
 
             self.table.setItem(row_idx, 0, item_email)
-            self.table.setItem(row_idx, 1, QTableWidgetItem(format_human_time(flash_reset)))
-            self.table.setItem(row_idx, 2, QTableWidgetItem(format_human_time(pro_reset)))
-            self.table.setItem(row_idx, 3, QTableWidgetItem(format_human_time(claude_reset)))
+            self.table.setItem(row_idx, 1, QTableWidgetItem(format_quota_info(flash_frac, flash_reset)))
+            self.table.setItem(row_idx, 2, QTableWidgetItem(format_quota_info(pro_frac, pro_reset)))
+            self.table.setItem(row_idx, 3, QTableWidgetItem(format_quota_info(claude_frac, claude_reset)))
 
             for c in range(4):
                 item = self.table.item(row_idx, c)
@@ -331,7 +350,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(
                     self,
                     "Berhasil Update Database",
-                    f"Berhasil mengonfirmasi & memperbarui data akun ke database!"
+                    "Berhasil mengonfirmasi & memperbarui data akun ke database!"
                 )
                 self.load_table_data()
             except Exception as e:

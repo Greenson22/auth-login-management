@@ -1,3 +1,4 @@
 /rancangan
 .env
 accounts_manager.db
+__pycache__
