@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
 )
 
 from src.database import AccountDatabase
+from src.turso_client import TursoClient
 from src.ui.components import (
     AccountTableWidget,
     ConfigBarWidget,
@@ -25,10 +26,11 @@ class MainWindow(QMainWindow):
 
   def __init__(self):
     super().__init__()
-    self.db = AccountDatabase()
     self.settings = QSettings("OpenCodeApp", "AccountManager")
+    self.db = None
     self.init_ui()
     self.load_settings()
+    self.init_database_connection()
     self.reload_accounts()
 
   def init_ui(self):
@@ -84,6 +86,42 @@ class MainWindow(QMainWindow):
       # Muat ulang folder di UI dari pengaturan terbaru
       folder = self.settings.value("antigravity_folder", "") or self.settings.value("opencode_folder", "")
       self.config_bar.set_folder_path(folder)
+      # Inisialisasi ulang database dan segarkan akun
+      self.init_database_connection()
+      self.reload_accounts()
+
+  def init_database_connection(self):
+    """Menginisialisasi koneksi database (Local SQLite atau Turso Cloud) dan mengupdate indikator UI."""
+    use_turso_val = self.settings.value("use_turso", False)
+    if isinstance(use_turso_val, str):
+      use_turso = use_turso_val.lower() in ("true", "1")
+    else:
+      use_turso = bool(use_turso_val)
+
+    turso_url = self.settings.value("turso_url", "")
+    turso_token = self.settings.value("turso_token", "")
+
+    if use_turso:
+      db_name = TursoClient.extract_db_name(turso_url)
+      client = TursoClient(turso_url, turso_token)
+      connected, msg = client.test_connection()
+      try:
+        self.db = AccountDatabase(
+            use_turso=True, turso_url=turso_url, turso_token=turso_token
+        )
+      except Exception as e:
+        connected = False
+        msg = str(e)
+
+      self.config_bar.set_db_status(
+          use_turso=True,
+          is_connected=connected,
+          db_name=db_name,
+          error_msg="" if connected else msg,
+      )
+    else:
+      self.db = AccountDatabase(use_turso=False)
+      self.config_bar.set_db_status(use_turso=False)
 
   def load_settings(self):
     """Memuat folder dan preferensi sorting yang tersimpan dari QSettings."""
@@ -98,8 +136,21 @@ class MainWindow(QMainWindow):
 
   def reload_accounts(self):
     """Mengambil data akun terbaru dari database dan meneruskannya ke AccountTableWidget."""
-    rows = self.db.fetch_accounts_summary()
-    self.account_table.set_accounts_data(rows)
+    try:
+      rows = self.db.fetch_accounts_summary() if self.db else []
+      self.account_table.set_accounts_data(rows)
+    except Exception as e:
+      self.account_table.set_accounts_data([])
+      use_turso_val = self.settings.value("use_turso", False)
+      use_turso = bool(use_turso_val) if not isinstance(use_turso_val, str) else use_turso_val.lower() in ("true", "1")
+      if use_turso:
+        db_name = TursoClient.extract_db_name(self.settings.value("turso_url", ""))
+        self.config_bar.set_db_status(
+            use_turso=True,
+            is_connected=False,
+            db_name=db_name,
+            error_msg=str(e),
+        )
 
   def process_json(self, raw_text: str):
     """Handler saat menyimpan JSON baru."""
