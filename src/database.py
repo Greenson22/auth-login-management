@@ -439,6 +439,95 @@ class AccountDatabase:
         conn.commit()
         return cursor.rowcount > 0
 
+  def rename_category(self, old_name: str, new_name: str) -> int:
+    """Mengubah nama kategori untuk semua akun dari old_name menjadi new_name."""
+    clean_old = old_name.strip() if old_name else ""
+    clean_new = new_name.strip() if new_name else ""
+    query = "UPDATE accounts SET category = ? WHERE category = ?"
+    if self.use_turso and self.turso_client:
+      _, affected = self.turso_client.execute(query, [clean_new, clean_old])
+      return affected
+    else:
+      with self.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, (clean_new, clean_old))
+        conn.commit()
+        return cursor.rowcount
+
+  def move_category_accounts(self, source_category: str, target_category: str) -> int:
+    """Memindahkan seluruh akun dari kategori source_category ke target_category."""
+    return self.rename_category(source_category, target_category)
+
+  def move_accounts_bulk(self, account_ids: list, target_category: str) -> int:
+    """Memindahkan daftar account_id terpilih ke target_category."""
+    if not account_ids:
+      return 0
+    clean_target = target_category.strip() if target_category else ""
+    placeholders = ",".join(["?"] * len(account_ids))
+    query = f"UPDATE accounts SET category = ? WHERE id IN ({placeholders})"
+    params = [clean_target] + list(account_ids)
+    if self.use_turso and self.turso_client:
+      _, affected = self.turso_client.execute(query, params)
+      return affected
+    else:
+      with self.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        conn.commit()
+        return cursor.rowcount
+
+  def delete_category_and_accounts(self, category: str) -> int:
+    """Menghapus semua akun dalam kategori tertentu serta data relasinya, lalu mengembalikan jumlah akun yang terhapus."""
+    clean_cat = category.strip() if category else ""
+    if not clean_cat:
+      return 0
+
+    if self.use_turso and self.turso_client:
+      # Ambil ID akun yang ada di kategori ini
+      find_query = "SELECT id FROM accounts WHERE category = ?"
+      rows, _ = self.turso_client.execute(find_query, [clean_cat])
+      acc_ids = [r[0] for r in (rows or []) if r and r[0]]
+      if not acc_ids:
+        return 0
+
+      # Hapus quota, fingerprints, dan accounts dengan pipeline
+      stmts = [
+          ("DELETE FROM account_quotas WHERE account_id IN (SELECT id FROM accounts WHERE category = ?)", [clean_cat]),
+          ("DELETE FROM account_fingerprints WHERE account_id IN (SELECT id FROM accounts WHERE category = ?)", [clean_cat]),
+          ("DELETE FROM accounts WHERE category = ?", [clean_cat]),
+      ]
+      results = self.turso_client.execute_pipeline(stmts)
+      if results and len(results) >= 3:
+        _, affected = results[2]
+        return affected
+      return len(acc_ids)
+    else:
+      with self.get_connection() as conn:
+        cursor = conn.cursor()
+        # Aktifkan pragma dan hapus
+        cursor.execute("DELETE FROM accounts WHERE category = ?", (clean_cat,))
+        affected = cursor.rowcount
+        conn.commit()
+        return affected
+
+  def fetch_categories_with_counts(self) -> list:
+    """Mengambil daftar kategori beserta jumlah akun di masing-masing kategori."""
+    query = """
+        SELECT category, COUNT(*) as count
+        FROM accounts
+        WHERE category IS NOT NULL AND TRIM(category) != ''
+        GROUP BY category
+        ORDER BY category COLLATE NOCASE ASC
+    """
+    if self.use_turso and self.turso_client:
+      rows, _ = self.turso_client.execute(query)
+      return [{"category": r[0], "count": int(r[1])} for r in (rows or []) if r and r[0]]
+    else:
+      with self.get_connection() as conn:
+        cursor = conn.cursor()
+        rows = cursor.execute(query).fetchall()
+        return [{"category": r[0], "count": int(r[1])} for r in rows if r and r[0]]
+
   def fetch_categories(self) -> list:
     """Mengambil daftar kategori unik yang aktif digunakan oleh akun di database."""
     query = """

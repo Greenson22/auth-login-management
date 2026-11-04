@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
+    QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -24,6 +25,8 @@ class AccountTableWidget(QWidget):
   update_db_requested = pyqtSignal(str, str)
   delete_requested = pyqtSignal(str, str)
   change_category_requested = pyqtSignal(str, str, str)  # account_id, email, current_category
+  bulk_change_category_requested = pyqtSignal(list)  # list of account_ids
+  manage_categories_requested = pyqtSignal()
   sort_mode_changed = pyqtSignal(int)
   category_filter_changed = pyqtSignal(str)
 
@@ -33,6 +36,7 @@ class AccountTableWidget(QWidget):
     super().__init__(parent)
     self._raw_account_rows = []
     self._current_password = ""
+    self._saved_category_selection = "__ALL__"
     self.init_ui()
 
   def init_ui(self):
@@ -51,6 +55,12 @@ class AccountTableWidget(QWidget):
     self.cmb_category_filter.setMinimumWidth(180)
     self.cmb_category_filter.addItem("Semua (Full - Dengan Pemisah)", "__ALL__")
     self.cmb_category_filter.currentIndexChanged.connect(self._on_category_filter_changed)
+
+    # Tombol Manajemen Kategori
+    self.btn_manage_categories = QPushButton("📁 Kelola Kategori")
+    self.btn_manage_categories.setToolTip("Buka manajemen kategori (Ubah nama, Pindah banyak, Hapus kategori)")
+    self.btn_manage_categories.setStyleSheet("padding: 4px 8px; font-weight: bold;")
+    self.btn_manage_categories.clicked.connect(self.manage_categories_requested.emit)
 
     # Urutkan Berdasarkan
     label_sort = QLabel("<b>Urutkan:</b>")
@@ -72,6 +82,7 @@ class AccountTableWidget(QWidget):
     control_layout.addStretch()
     control_layout.addWidget(label_filter)
     control_layout.addWidget(self.cmb_category_filter)
+    control_layout.addWidget(self.btn_manage_categories)
     control_layout.addWidget(label_sort)
     control_layout.addWidget(self.cmb_sort_mode)
 
@@ -95,7 +106,7 @@ class AccountTableWidget(QWidget):
     header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
 
     self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-    self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+    self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
     self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     self.table.customContextMenuRequested.connect(self._show_context_menu)
 
@@ -108,7 +119,9 @@ class AccountTableWidget(QWidget):
 
   def _on_category_filter_changed(self, _index: int):
     current_data = self.cmb_category_filter.currentData()
-    self.category_filter_changed.emit(str(current_data))
+    if current_data is not None:
+      self._saved_category_selection = str(current_data)
+      self.category_filter_changed.emit(str(current_data))
     self._render_table()
 
   def get_sort_index(self) -> int:
@@ -119,11 +132,18 @@ class AccountTableWidget(QWidget):
       self.cmb_sort_mode.setCurrentIndex(index)
 
   def get_selected_filter_category(self) -> str:
-    return str(self.cmb_category_filter.currentData() or "__ALL__")
+    return str(self.cmb_category_filter.currentData() or self._saved_category_selection or "__ALL__")
+
+  def set_selected_filter_category(self, category_key: str):
+    """Menyetel kategori filter yang ingin dipilih dan merestore jika tersedia."""
+    self._saved_category_selection = category_key or "__ALL__"
+    idx = self.cmb_category_filter.findData(self._saved_category_selection)
+    if idx >= 0 and idx != self.cmb_category_filter.currentIndex():
+      self.cmb_category_filter.setCurrentIndex(idx)
 
   def update_filter_categories(self, categories: list):
     """Memperbarui daftar kategori di dropdown filter dan mempertahankan seleksi jika masih ada."""
-    current_selected = self.get_selected_filter_category()
+    target_selected = self._saved_category_selection or self.get_selected_filter_category()
     self.cmb_category_filter.blockSignals(True)
     self.cmb_category_filter.clear()
     self.cmb_category_filter.addItem("Semua (Full - Dengan Pemisah)", "__ALL__")
@@ -133,20 +153,21 @@ class AccountTableWidget(QWidget):
     for cat in categories:
       if cat:
         self.cmb_category_filter.addItem(f"📁 {cat}", cat)
-        if cat == current_selected:
+        if cat == target_selected:
           has_selected = True
 
-    if current_selected == "__ALL__":
+    if target_selected == "__ALL__":
       self.cmb_category_filter.setCurrentIndex(0)
-    elif current_selected == "__NONE__":
+    elif target_selected == "__NONE__":
       self.cmb_category_filter.setCurrentIndex(1)
     elif has_selected:
-      idx = self.cmb_category_filter.findData(current_selected)
+      idx = self.cmb_category_filter.findData(target_selected)
       if idx >= 0:
         self.cmb_category_filter.setCurrentIndex(idx)
     else:
       # Jika kategori yang dipilih sebelumnya sudah tidak ada (semua akunnya dipindah), kembali ke Semua
       self.cmb_category_filter.setCurrentIndex(0)
+      self._saved_category_selection = "__ALL__"
 
     self.cmb_category_filter.blockSignals(False)
 
@@ -402,6 +423,31 @@ class AccountTableWidget(QWidget):
     account_id = role_data
     email = first_item.text()
 
+    # Periksa apakah ada multi-selection akun
+    selected_rows = self.table.selectionModel().selectedRows()
+    selected_accounts = []
+    for m_idx in selected_rows:
+      r = m_idx.row()
+      fi = self.table.item(r, 0)
+      if fi:
+        rd = fi.data(Qt.ItemDataRole.UserRole)
+        if rd and rd != self.SEPARATOR_ROLE_VALUE:
+          selected_accounts.append((rd, fi.text()))
+
+    # Jika user memilih lebih dari 1 akun dan klik pada salah satu akun yang terseleksi
+    if len(selected_accounts) > 1 and any(acc[0] == account_id for acc in selected_accounts):
+      menu = QMenu(self)
+      action_bulk_cat = menu.addAction(f"  🏷️ Pindahkan {len(selected_accounts)} Akun Terpilih ke Kategori...")
+      menu.addSeparator()
+      action_manage = menu.addAction("  📁 Manajemen Kategori...")
+
+      chosen_action = menu.exec(self.table.viewport().mapToGlobal(pos))
+      if chosen_action == action_bulk_cat:
+        self.bulk_change_category_requested.emit([acc[0] for acc in selected_accounts])
+      elif chosen_action == action_manage:
+        self.manage_categories_requested.emit()
+      return
+
     # Ambil kategori saat ini dari kolom 1
     cat_item = self.table.item(row, 1)
     current_category = str(cat_item.data(Qt.ItemDataRole.UserRole) or "") if cat_item else ""
@@ -414,6 +460,7 @@ class AccountTableWidget(QWidget):
     )
     menu.addSeparator()
     action_change_cat = menu.addAction("  🏷️ Ubah Kategori...")
+    action_manage = menu.addAction("  📁 Manajemen Kategori...")
     menu.addSeparator()
     action_delete = menu.addAction("  🗑️ Hapus Akun")
 
@@ -426,5 +473,7 @@ class AccountTableWidget(QWidget):
       self.update_db_requested.emit(account_id, email)
     elif chosen_action == action_change_cat:
       self.change_category_requested.emit(account_id, email, current_category)
+    elif chosen_action == action_manage:
+      self.manage_categories_requested.emit()
     elif chosen_action == action_delete:
       self.delete_requested.emit(account_id, email)

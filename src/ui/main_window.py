@@ -18,6 +18,7 @@ from src.turso_client import TursoClient
 from src.ui.components import (
     AboutDialog,
     AccountTableWidget,
+    CategoryManagementDialog,
     ConfigBarWidget,
     JsonInputWidget,
     LoadingDialog,
@@ -67,6 +68,9 @@ class MainWindow(QMainWindow):
     self.json_input.json_submitted.connect(self.process_json)
 
     self.account_table.sort_mode_changed.connect(self._on_sort_mode_changed)
+    self.account_table.category_filter_changed.connect(self._on_category_filter_changed)
+    self.account_table.manage_categories_requested.connect(self.open_category_management_dialog)
+    self.account_table.bulk_change_category_requested.connect(self.bulk_change_account_category)
     self.account_table.copy_requested.connect(self.copy_account_json)
     self.account_table.update_file_requested.connect(self.update_antigravity_file)
     self.account_table.update_db_requested.connect(self.update_db_from_antigravity)
@@ -77,6 +81,13 @@ class MainWindow(QMainWindow):
 
   def _init_menu_bar(self):
     menu_bar = self.menuBar()
+
+    category_menu = menu_bar.addMenu("&Kategori")
+    manage_cat_action = QAction("&Kelola Kategori...", self)
+    manage_cat_action.setShortcut(QKeySequence("Ctrl+M"))
+    manage_cat_action.setStatusTip("Ubah nama, pindahkan banyak akun, atau hapus kategori")
+    manage_cat_action.triggered.connect(self.open_category_management_dialog)
+    category_menu.addAction(manage_cat_action)
 
     settings_menu = menu_bar.addMenu("&Pengaturan")
 
@@ -183,17 +194,23 @@ class MainWindow(QMainWindow):
     return self.settings.value("aes256_password", "") or ""
 
   def load_settings(self):
-    """Memuat folder, preferensi sorting, dan indikator enkripsi dari QSettings."""
+    """Memuat folder, preferensi sorting, filter kategori, dan indikator enkripsi dari QSettings."""
     saved_folder = self.settings.value("antigravity_folder", "") or self.settings.value("opencode_folder", "")
     self.config_bar.set_folder_path(saved_folder)
 
     saved_sort = self.settings.value("sort_mode_index", 0, type=int)
     self.account_table.set_sort_index(saved_sort)
 
+    saved_cat = self.settings.value("selected_category_filter", "__ALL__", type=str)
+    self.account_table.set_selected_filter_category(saved_cat)
+
     self.config_bar.set_crypto_status(self._is_encryption_enabled())
 
   def _on_sort_mode_changed(self, index: int):
     self.settings.setValue("sort_mode_index", index)
+
+  def _on_category_filter_changed(self, category_key: str):
+    self.settings.setValue("selected_category_filter", category_key)
 
   # ─── Reload Akun ───
 
@@ -345,6 +362,64 @@ class MainWindow(QMainWindow):
         on_success,
         on_failed,
     )
+
+  def bulk_change_account_category(self, account_ids: list):
+    """Memindahkan beberapa akun yang dipilih sekaligus ke kategori lain."""
+    if not self.db or not account_ids:
+      return
+
+    existing_cats = self.db.fetch_categories()
+    items = ["(Tanpa Kategori)"] + [c for c in existing_cats if c]
+
+    new_cat_raw, ok = QInputDialog.getItem(
+        self,
+        "Pindah Kategori Banyak Akun",
+        f"Pilih atau ketik kategori baru untuk {len(account_ids)} akun terpilih:",
+        items,
+        0,
+        True,
+    )
+
+    if not ok:
+      return
+
+    new_cat_str = new_cat_raw.strip()
+    if new_cat_str == "(Tanpa Kategori)":
+      new_cat_str = ""
+
+    def task():
+      return self.db.move_accounts_bulk(account_ids, new_cat_str)
+
+    def on_success(affected):
+      if new_cat_str:
+        msg = f"Berhasil memindahkan <b>{affected}</b> akun ke kategori: <b>{new_cat_str}</b>"
+      else:
+        msg = f"Berhasil mengosongkan kategori (Tanpa Kategori) untuk <b>{affected}</b> akun."
+      QMessageBox.information(self, "Kategori Diperbarui", msg)
+      self.reload_accounts()
+
+    def on_failed(e):
+      QMessageBox.critical(self, "Database Error", f"Terjadi kesalahan saat memindahkan akun:\n\n{str(e)}")
+
+    self.run_async_task(
+        "Memindahkan Akun",
+        f"Memindahkan {len(account_ids)} akun ke kategori baru...",
+        task,
+        on_success,
+        on_failed,
+    )
+
+  def open_category_management_dialog(self):
+    """Membuka dialog manajemen kategori (Ubah nama, Pindah banyak akun, Hapus kategori & akun)."""
+    if not self.db:
+      QMessageBox.warning(self, "Database Belum Siap", "Koneksi database belum tersedia.")
+      return
+
+    dialog = CategoryManagementDialog(self.db, self)
+    dialog.categories_updated.connect(self.reload_accounts)
+    dialog.exec()
+    if dialog.has_changes:
+      self.reload_accounts()
 
   # ─── Copy JSON ke Clipboard ───
 
