@@ -5,6 +5,7 @@ from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtGui import QAction, QIcon, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
+    QInputDialog,
     QMainWindow,
     QMessageBox,
     QSplitter,
@@ -69,6 +70,7 @@ class MainWindow(QMainWindow):
     self.account_table.copy_requested.connect(self.copy_account_json)
     self.account_table.update_file_requested.connect(self.update_antigravity_file)
     self.account_table.update_db_requested.connect(self.update_db_from_antigravity)
+    self.account_table.change_category_requested.connect(self.change_account_category)
     self.account_table.delete_requested.connect(self.delete_account_with_confirmation)
 
     self._init_menu_bar()
@@ -199,17 +201,23 @@ class MainWindow(QMainWindow):
     """Mengambil data akun terbaru dari database dengan loading indicator."""
     if not self.db:
       self.account_table.set_accounts_data([])
+      self.json_input.set_categories([])
       return
 
     def task():
-      return self.db.fetch_accounts_summary()
+      rows = self.db.fetch_accounts_summary()
+      cats = self.db.fetch_categories()
+      return rows, cats
 
-    def on_success(rows):
+    def on_success(result):
+      rows, cats = result
       current_pwd = self._get_encryption_password()
       self.account_table.set_accounts_data(rows or [], current_password=current_pwd)
+      self.json_input.set_categories(cats or [])
 
     def on_failed(e):
       self.account_table.set_accounts_data([], current_password="")
+      self.json_input.set_categories([])
       use_turso_val = self.settings.value("use_turso", False)
       use_turso = (
           bool(use_turso_val)
@@ -235,7 +243,7 @@ class MainWindow(QMainWindow):
 
   # ─── Simpan JSON ke Database ───
 
-  def process_json(self, raw_text: str):
+  def process_json(self, raw_text: str, category: str = ""):
     """Handler saat menyimpan JSON baru ke database."""
     if not raw_text:
       QMessageBox.warning(self, "Peringatan", "Area teks JSON masih kosong!")
@@ -262,12 +270,15 @@ class MainWindow(QMainWindow):
       return
 
     def task():
-      return self.db.insert_or_update_json(raw_text, encrypt=encrypt, password=pwd)
+      return self.db.insert_or_update_json(
+          raw_text, encrypt=encrypt, password=pwd, category=category
+      )
 
     def on_success(count):
       info_enc = " (Terenkripsi AES-256 — semua field sensitif terenkripsi)" if encrypt else ""
+      cat_info = f" pada kategori '{category}'" if category else ""
       QMessageBox.information(
-          self, "Sukses", f"Berhasil menyimpan {count} akun!{info_enc}"
+          self, "Sukses", f"Berhasil menyimpan {count} akun{cat_info}!{info_enc}"
       )
       self.json_input.clear_input()
       self.reload_accounts()
@@ -281,6 +292,59 @@ class MainWindow(QMainWindow):
         else "Menyimpan data akun ke database..."
     )
     self.run_async_task("Menyimpan Akun", msg, task, on_success, on_failed)
+
+  def change_account_category(self, account_id: str, email: str, current_category: str):
+    """Menampilkan dialog untuk mengubah atau memindahkan kategori akun."""
+    if not self.db:
+      return
+
+    existing_cats = self.db.fetch_categories()
+    items = ["(Tanpa Kategori)"] + [c for c in existing_cats if c]
+
+    current_idx = 0
+    if current_category and current_category in items:
+      current_idx = items.index(current_category)
+
+    new_cat_raw, ok = QInputDialog.getItem(
+        self,
+        "Ubah Kategori Akun",
+        f"Pilih atau ketik kategori baru untuk:\n{email}",
+        items,
+        current_idx,
+        True,
+    )
+
+    if not ok:
+      return
+
+    new_cat_str = new_cat_raw.strip()
+    if new_cat_str == "(Tanpa Kategori)":
+      new_cat_str = ""
+
+    def task():
+      return self.db.update_account_category(account_id, new_cat_str)
+
+    def on_success(success):
+      if success:
+        if new_cat_str:
+          msg = f"Kategori akun <b>{email}</b> berhasil diubah ke: <b>{new_cat_str}</b>"
+        else:
+          msg = f"Kategori akun <b>{email}</b> telah dikosongkan (Tanpa Kategori)."
+        QMessageBox.information(self, "Kategori Diperbarui", msg)
+        self.reload_accounts()
+      else:
+        QMessageBox.warning(self, "Gagal", "Gagal memperbarui kategori akun di database.")
+
+    def on_failed(e):
+      QMessageBox.critical(self, "Database Error", f"Terjadi kesalahan:\n\n{str(e)}")
+
+    self.run_async_task(
+        "Memperbarui Kategori",
+        f"Memperbarui kategori {email}...",
+        task,
+        on_success,
+        on_failed,
+    )
 
   # ─── Copy JSON ke Clipboard ───
 

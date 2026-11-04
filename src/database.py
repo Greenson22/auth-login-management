@@ -55,6 +55,7 @@ class AccountDatabase:
             rate_limit_reset_times TEXT,
             is_encrypted INTEGER NOT NULL DEFAULT 0,
             enc_check TEXT,
+            category TEXT DEFAULT '',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """
@@ -106,6 +107,10 @@ class AccountDatabase:
           self.turso_client.execute("ALTER TABLE accounts ADD COLUMN enc_check TEXT")
         except Exception:
           pass
+        try:
+          self.turso_client.execute("ALTER TABLE accounts ADD COLUMN category TEXT DEFAULT ''")
+        except Exception:
+          pass
       except Exception:
         # Jika database offline / belum terhubung saat startup, abaikan agar tidak crash
         pass
@@ -124,9 +129,13 @@ class AccountDatabase:
           cursor.execute("ALTER TABLE accounts ADD COLUMN rate_limit_reset_times TEXT;")
         if "enc_check" not in columns:
           cursor.execute("ALTER TABLE accounts ADD COLUMN enc_check TEXT;")
+        if "category" not in columns:
+          cursor.execute("ALTER TABLE accounts ADD COLUMN category TEXT DEFAULT '';")
         conn.commit()
 
-  def _prepare_account_record(self, acc: dict, encrypt: bool, password: str):
+  def _prepare_account_record(
+      self, acc: dict, encrypt: bool, password: str, category: str = ""
+  ):
     """Menyiapkan data akun, fingerprint, dan quota untuk disimpan (terenkripsi atau plaintext)."""
     acc_id = acc.get("id")
     email = acc.get("email")
@@ -159,6 +168,8 @@ class AccountDatabase:
       stored_rate_limit_reset_times = json.dumps(acc.get("rateLimitResetTimes", {}))
       stored_enc_check = None
 
+    cat_val = category.strip() if category else (acc.get("category") or "").strip()
+
     args_acc = [
         acc_id,
         email,
@@ -173,6 +184,7 @@ class AccountDatabase:
         stored_rate_limit_reset_times,
         is_encrypted_val,
         stored_enc_check,
+        cat_val,
     ]
 
     fp = acc.get("fingerprint", {}) or {}
@@ -232,7 +244,11 @@ class AccountDatabase:
     return args_acc, args_fp, args_quotas
 
   def insert_or_update_json(
-      self, raw_json_str: str, encrypt: bool = False, password: str = ""
+      self,
+      raw_json_str: str,
+      encrypt: bool = False,
+      password: str = "",
+      category: str = "",
   ) -> int:
     """Parsing JSON dan menyimpannya ke database (Local SQLite atau Turso).
 
@@ -252,8 +268,8 @@ class AccountDatabase:
         INSERT INTO accounts (
             id, email, refresh_token, project_id, managed_project_id,
             enabled, verification_required, added_at, last_used, cached_quota_updated_at,
-            rate_limit_reset_times, is_encrypted, enc_check
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            rate_limit_reset_times, is_encrypted, enc_check, category
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             email=excluded.email,
             refresh_token=excluded.refresh_token,
@@ -266,7 +282,8 @@ class AccountDatabase:
             cached_quota_updated_at=excluded.cached_quota_updated_at,
             rate_limit_reset_times=excluded.rate_limit_reset_times,
             is_encrypted=excluded.is_encrypted,
-            enc_check=excluded.enc_check
+            enc_check=excluded.enc_check,
+            category=CASE WHEN excluded.category != '' THEN excluded.category ELSE accounts.category END
     """
     sql_fp = """
         INSERT INTO account_fingerprints (
@@ -300,7 +317,7 @@ class AccountDatabase:
     if self.use_turso and self.turso_client:
       pipeline_stmts = []
       for acc in accounts:
-        prepared = self._prepare_account_record(acc, encrypt, password)
+        prepared = self._prepare_account_record(acc, encrypt, password, category)
         if not prepared:
           continue
         args_acc, args_fp, list_args_quotas = prepared
@@ -319,7 +336,7 @@ class AccountDatabase:
       with self.get_connection() as conn:
         cursor = conn.cursor()
         for acc in accounts:
-          prepared = self._prepare_account_record(acc, encrypt, password)
+          prepared = self._prepare_account_record(acc, encrypt, password, category)
           if not prepared:
             continue
           args_acc, args_fp, list_args_quotas = prepared
@@ -408,8 +425,39 @@ class AccountDatabase:
         conn.commit()
         return cursor.rowcount > 0
 
+  def update_account_category(self, account_id: str, category: str) -> bool:
+    """Mengubah kategori akun di database."""
+    clean_cat = category.strip() if category else ""
+    query = "UPDATE accounts SET category = ? WHERE id = ?"
+    if self.use_turso and self.turso_client:
+      _, affected = self.turso_client.execute(query, [clean_cat, account_id])
+      return affected > 0
+    else:
+      with self.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, (clean_cat, account_id))
+        conn.commit()
+        return cursor.rowcount > 0
+
+  def fetch_categories(self) -> list:
+    """Mengambil daftar kategori unik yang aktif digunakan oleh akun di database."""
+    query = """
+        SELECT DISTINCT category
+        FROM accounts
+        WHERE category IS NOT NULL AND TRIM(category) != ''
+        ORDER BY category COLLATE NOCASE ASC
+    """
+    if self.use_turso and self.turso_client:
+      rows, _ = self.turso_client.execute(query)
+      return [r[0] for r in (rows or []) if r and r[0]]
+    else:
+      with self.get_connection() as conn:
+        cursor = conn.cursor()
+        rows = cursor.execute(query).fetchall()
+        return [r[0] for r in rows if r and r[0]]
+
   def fetch_accounts_summary(self):
-    """Mengambil Email, Reset Time, Remaining Fraction per model, dan Status Enkripsi untuk keperluan UI."""
+    """Mengambil Email, Reset Time, Remaining Fraction per model, Status Enkripsi, dan Kategori untuk keperluan UI."""
     query = """
         SELECT 
             a.id,
@@ -421,7 +469,8 @@ class AccountDatabase:
             MAX(CASE WHEN q.model_name = 'claude' THEN q.reset_time END) AS claude_reset,
             MAX(CASE WHEN q.model_name = 'claude' THEN q.remaining_fraction END) AS claude_frac,
             a.is_encrypted,
-            a.enc_check
+            a.enc_check,
+            COALESCE(a.category, '') AS category
         FROM accounts a
         LEFT JOIN account_quotas q ON a.id = q.account_id
         GROUP BY a.id
@@ -444,7 +493,7 @@ class AccountDatabase:
     query_acc = """
         SELECT id, refresh_token, project_id, email, enabled, added_at,
                 last_used, verification_required, managed_project_id, cached_quota_updated_at,
-                is_encrypted, rate_limit_reset_times, enc_check
+                is_encrypted, rate_limit_reset_times, enc_check, COALESCE(category, '')
         FROM accounts WHERE id = ?
     """
     query_fp = """
@@ -578,11 +627,14 @@ class AccountDatabase:
           "modelCount": model_count,
       }
 
+    cat_val = acc_row[13] if len(acc_row) > 13 and acc_row[13] else ""
+
     account_json = {
         "id": acc_row[0],
         "refreshToken": final_refresh_token,
         "projectId": final_project_id,
         "email": acc_row[3],
+        "category": cat_val,
         "enabled": bool(final_enabled),
         "addedAt": final_added_at,
         "lastUsed": final_last_used,
