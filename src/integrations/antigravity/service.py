@@ -288,8 +288,14 @@ class AntigravityFacade:
         msg = "Refresh token telah dicabut atau kedaluwarsa (invalid_grant). Silakan login ulang."
       elif err_code == "unauthorized_client":
         msg = "Token bukan milik client Antigravity (unauthorized_client). Silakan login ulang."
+      elif err_code in ("rate_limit_exceeded", "too_many_requests", "quota_exceeded"):
+        msg = "Batas permintaan Google terlampaui. Coba lagi beberapa saat."
       else:
-        msg = f"Gagal memvalidasi token ke Google: {err_code} - {err_desc}"
+        # Sanitasi: jangan bocorkan respons HTML atau teks mentah dari server
+        safe_desc = err_desc if err_desc and len(err_desc) <= 80 and "<" not in err_desc else ""
+        msg = f"Gagal memvalidasi token ke Google ({err_code}). Coba lagi atau login ulang." + (
+            f" Detail: {safe_desc}" if safe_desc else ""
+        )
 
       return ApplyPlan(
           account_snapshot=account,
