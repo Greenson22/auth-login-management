@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import shutil
+import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from src.database import AccountDatabase
 from .opencode_file import RealOpenCodeFilePort
@@ -191,72 +199,236 @@ class NullKeyringPort:
 
 
 class ProductionKeyringPort:
-  """Port keyring nyata menggunakan D-Bus/Secret Service (Linux).
-
-  Memanfaatkan python3-dbus yang tersedia di jalur sistem.
-  Tiket 09 akan mengisi implementasi penuh write/delete.
-  """
+  """Port keyring nyata menggunakan D-Bus/Secret Service (Linux) dengan fallback secret-tool."""
 
   def read(self, service: str, username: str) -> Optional[bytes]:
     """Baca payload keyring sebagai bytes, atau None jika tidak ada."""
     dbus = _try_import_dbus()
-    if dbus is None:
-      return None
-    try:
-      bus = dbus.SessionBus()
-      service_obj = bus.get_object(
-          "org.freedesktop.secrets", "/org/freedesktop/secrets"
-      )
-      iface = dbus.Interface(service_obj, "org.freedesktop.Secret.Service")
-      _path, session = iface.OpenSession("plain", dbus.String("", variant_level=1))
-      attrs = dbus.Dictionary(
-          {"service": service, "username": username}, signature="ss"
-      )
-      unlocked, locked = iface.SearchItems(attrs)
-      paths = list(unlocked) + list(locked)
-      if not paths:
-        return None
-      item_obj = bus.get_object("org.freedesktop.secrets", paths[0])
-      item_iface = dbus.Interface(item_obj, "org.freedesktop.Secret.Item")
-      secret = item_iface.GetSecret(session)
-      value = secret[2]
-      return bytes(bytearray(value))
-    except Exception:
-      return None
+    if dbus is not None:
+      try:
+        bus = dbus.SessionBus()
+        service_obj = bus.get_object(
+            "org.freedesktop.secrets", "/org/freedesktop/secrets"
+        )
+        iface = dbus.Interface(service_obj, "org.freedesktop.Secret.Service")
+        _path, session = iface.OpenSession("plain", dbus.String("", variant_level=1))
+        attrs = dbus.Dictionary(
+            {"service": service, "username": username}, signature="ss"
+        )
+        unlocked, locked = iface.SearchItems(attrs)
+        paths = list(unlocked) + list(locked)
+        if paths:
+          item_obj = bus.get_object("org.freedesktop.secrets", paths[0])
+          item_iface = dbus.Interface(item_obj, "org.freedesktop.Secret.Item")
+          secret = item_iface.GetSecret(session)
+          value = secret[2]
+          return bytes(bytearray(value))
+      except Exception as exc:
+        logger.debug("Gagal membaca keyring via dbus: %s", exc)
+
+    # Fallback via secret-tool bila terpasang
+    if shutil.which("secret-tool") is not None:
+      try:
+        res = subprocess.run(
+            ["secret-tool", "lookup", "service", service, "username", username],
+            capture_output=True,
+            check=False,
+        )
+        if res.returncode == 0 and res.stdout:
+          return res.stdout
+      except Exception as exc:
+        logger.debug("Gagal membaca keyring via secret-tool: %s", exc)
+
+    return None
 
   def write(self, service: str, username: str, payload: bytes) -> None:
-    # Implementasi penuh di tiket 09
-    pass
+    """Tulis item keyring dengan atribut service dan username."""
+    if not isinstance(payload, bytes):
+      raise TypeError("Payload keyring harus bytes")
+
+    label = f"auth-login-management {service} {username}"
+    dbus = _try_import_dbus()
+    if dbus is not None:
+      try:
+        bus = dbus.SessionBus()
+        service_obj = bus.get_object(
+            "org.freedesktop.secrets", "/org/freedesktop/secrets"
+        )
+        iface = dbus.Interface(service_obj, "org.freedesktop.Secret.Service")
+        _path, session = iface.OpenSession("plain", dbus.String("", variant_level=1))
+        attrs = dbus.Dictionary(
+            {"service": service, "username": username}, signature="ss"
+        )
+
+        # Cari collection 'default' atau 'login'
+        coll_obj = bus.get_object(
+            "org.freedesktop.secrets", "/org/freedesktop/secrets/aliases/default"
+        )
+        coll_iface = dbus.Interface(coll_obj, "org.freedesktop.Secret.Collection")
+        properties = dbus.Dictionary({
+            "org.freedesktop.Secret.Item.Label": dbus.String(label, variant_level=1),
+            "org.freedesktop.Secret.Item.Attributes": dbus.Dictionary(
+                {"service": service, "username": username}, signature="ss", variant_level=1
+            ),
+        }, signature="sv")
+        secret_struct = (session, dbus.ByteArray(b""), dbus.ByteArray(payload), dbus.String("text/plain"))
+        coll_iface.CreateItem(properties, secret_struct, True)
+        return
+      except Exception as exc:
+        logger.debug("Gagal menulis keyring via dbus: %s", exc)
+
+    # Fallback via secret-tool
+    if shutil.which("secret-tool") is not None:
+      res = subprocess.run(
+          ["secret-tool", "store", "--label", label, "service", service, "username", username],
+          input=payload,
+          capture_output=True,
+          check=False,
+      )
+      if res.returncode != 0:
+        err = res.stderr.decode(errors="replace").strip()
+        raise RuntimeError(f"Gagal menulis ke keyring via secret-tool: {err}")
+      return
+
+    raise RuntimeError("Tidak ada backend keyring yang tersedia untuk menulis kredensial")
 
   def delete(self, service: str, username: str) -> None:
-    # Implementasi penuh di tiket 09
-    pass
+    """Hapus item keyring jika ada."""
+    dbus = _try_import_dbus()
+    if dbus is not None:
+      try:
+        bus = dbus.SessionBus()
+        service_obj = bus.get_object(
+            "org.freedesktop.secrets", "/org/freedesktop/secrets"
+        )
+        iface = dbus.Interface(service_obj, "org.freedesktop.Secret.Service")
+        attrs = dbus.Dictionary(
+            {"service": service, "username": username}, signature="ss"
+        )
+        unlocked, locked = iface.SearchItems(attrs)
+        for item_path in list(unlocked) + list(locked):
+          item_obj = bus.get_object("org.freedesktop.secrets", item_path)
+          item_iface = dbus.Interface(item_obj, "org.freedesktop.Secret.Item")
+          item_iface.Delete()
+        return
+      except Exception as exc:
+        logger.debug("Gagal menghapus keyring via dbus: %s", exc)
+
+    if shutil.which("secret-tool") is not None:
+      subprocess.run(
+          ["secret-tool", "clear", "service", service, "username", username],
+          capture_output=True,
+          check=False,
+      )
 
 
 class ProductionGeminiFilesPort:
-  """Port file ~/.gemini nyata (tiket 09)."""
+  """Port file ~/.gemini nyata (tiket 09).
+  
+  Membaca dan menulis file oauth_creds.json dan google_accounts.json secara atomic
+  dengan mode 0600. Bila direktori ~/.gemini belum ada, dibuat dengan mode 0700.
+  """
 
   def __init__(self, gemini_dir: Optional[Path] = None):
-    self.gemini_dir = gemini_dir or Path.home() / ".gemini"
+    self.gemini_dir = gemini_dir or (Path.home() / ".gemini")
+
+  def _ensure_dir(self) -> None:
+    if not self.gemini_dir.exists():
+      self.gemini_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+      try:
+        os.chmod(self.gemini_dir, 0o700)
+      except Exception:
+        pass
+
+  def _write_json_atomic(self, file_path: Path, data: Dict[str, Any]) -> None:
+    if file_path.is_symlink():
+      raise PermissionError(f"File {file_path.name} adalah symlink, penulisan dibatalkan")
+
+    self._ensure_dir()
+    temp_file = file_path.with_name(f"{file_path.name}.tmp")
+    content = json.dumps(data, indent=2)
+    fd = os.open(temp_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with open(fd, "w", encoding="utf-8") as f:
+      f.write(content)
+    try:
+      os.chmod(temp_file, 0o600)
+    except Exception:
+      pass
+    os.replace(temp_file, file_path)
 
   def read_oauth_creds(self) -> Optional[Dict[str, Any]]:
-    return None
+    path = self.gemini_dir / "oauth_creds.json"
+    if not path.exists() or path.is_symlink():
+      return None
+    try:
+      return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+      return None
 
   def write_oauth_creds(self, creds: Dict[str, Any]) -> None:
-    pass
+    self._write_json_atomic(self.gemini_dir / "oauth_creds.json", creds)
 
   def read_google_accounts(self) -> Optional[Dict[str, Any]]:
-    return None
+    path = self.gemini_dir / "google_accounts.json"
+    if not path.exists() or path.is_symlink():
+      return None
+    try:
+      return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+      return None
 
   def write_google_accounts(self, accounts: Dict[str, Any]) -> None:
-    pass
+    self._write_json_atomic(self.gemini_dir / "google_accounts.json", accounts)
 
 
 class ProductionOAuthPort:
-  """Port OAuth nyata (tiket 09)."""
+  """Port OAuth nyata (tiket 09) memanggil endpoint token Google."""
+
+  def __init__(self, timeout: float = 30.0):
+    self.timeout = timeout
 
   def exchange_refresh_token(self, refresh_token: str) -> Any:
-    raise NotImplementedError("OAuth exchange nyata tersedia di tiket 09")
+    from .constants import ANTIGRAVITY_CLIENT_ID, TOKEN_ENDPOINT
+    from tests.fakes import OAuthErrorStub, OAuthTokenResponse
+
+    params = {
+        "client_id": ANTIGRAVITY_CLIENT_ID,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+    }
+    data = urllib.parse.urlencode(params).encode("utf-8")
+    req = urllib.request.Request(
+        TOKEN_ENDPOINT,
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+
+    try:
+      with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as http_err:
+      try:
+        err_body = json.loads(http_err.read().decode("utf-8"))
+        code = err_body.get("error", "oauth_error")
+        desc = err_body.get("error_description", str(http_err))
+      except Exception:
+        code = f"http_{http_err.code}"
+        desc = str(http_err)
+      raise OAuthErrorStub(code, desc)
+    except Exception as exc:
+      raise RuntimeError(f"Gagal menghubungi server token Google: {exc}")
+
+    expires_in = int(body.get("expires_in", 3600))
+    now = time.time()
+    return OAuthTokenResponse(
+        access_token=body.get("access_token", ""),
+        refresh_token=body.get("refresh_token") or None,
+        expiry=now + expires_in,
+        id_token=body.get("id_token") or None,
+        token_type=body.get("token_type", "Bearer"),
+        expires_in=expires_in,
+    )
 
 
 from .process import AgySession, LinuxProcessManager

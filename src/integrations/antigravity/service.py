@@ -9,7 +9,12 @@ Menyediakan empat operasi utama:
 
 from __future__ import annotations
 
+import base64
+import datetime
+import json
 import logging
+import os
+import secrets
 from typing import Any, Dict, List, Optional
 
 from src.targets import TARGET_ANTIGRAVITY_CLI, TARGET_OPENCODE, normalize_target
@@ -21,6 +26,8 @@ from .backup import (
     get_latest_backup,
     rollback_from_backup,
 )
+from .constants import KEYRING_SERVICE, KEYRING_USERNAME
+from .errors import OAuthError
 from .ports import (
     AccountStoragePort,
     ApplyPlan,
@@ -40,6 +47,27 @@ from .ports import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _decode_id_token_email(id_token: str) -> Optional[str]:
+  """Membaca klaim email dari payload JWT id_token tanpa memverifikasi tanda tangan."""
+  try:
+    parts = id_token.split(".")
+    if len(parts) < 2:
+      return None
+    payload_b64 = parts[1]
+    padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+    payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+    email = payload.get("email")
+    return str(email).strip().lower() if email else None
+  except Exception:
+    return None
+
+
+def _format_rfc3339_with_skew(timestamp: float, skew_seconds: float = 30.0) -> str:
+  """Format timestamp epoch ke format RFC3339 (ISO8601) dengan timezone lokal dan skew 30 detik."""
+  dt = datetime.datetime.fromtimestamp(timestamp + skew_seconds).astimezone()
+  return dt.isoformat()
 
 
 def compute_active_di(
@@ -203,7 +231,7 @@ class AntigravityFacade:
           error_message="Keyring terkunci. Silakan buka keyring terlebih dahulu.",
       )
 
-    # Deteksi sesi agy
+    # Deteksi sesi agy terlebih dahulu
     try:
       sessions = self.process_manager.detect_sessions()
     except Exception as exc:
@@ -224,10 +252,116 @@ class AntigravityFacade:
     ]
     requires_confirmation = bool(alive_sessions and not auto_kill)
 
+    # Validasi format refresh_token akun
+    raw_refresh_token = account.get("refresh_token")
+    if not raw_refresh_token or not isinstance(raw_refresh_token, str) or not raw_refresh_token.strip():
+      return ApplyPlan(
+          account_snapshot=account,
+          target=canonical_target,
+          target_available=False,
+          detected_sessions=sessions,
+          requires_confirmation=requires_confirmation,
+          error_code="empty_refresh_token",
+          error_message="Refresh token akun kosong atau tidak valid.",
+      )
+
+    clean_rt = raw_refresh_token.strip()
+    # Bentuk wajar: tidak kosong, tidak memuat spasi/karakter newline
+    if any(c.isspace() for c in clean_rt) or len(clean_rt) < 5:
+      return ApplyPlan(
+          account_snapshot=account,
+          target=canonical_target,
+          target_available=False,
+          detected_sessions=sessions,
+          requires_confirmation=requires_confirmation,
+          error_code="invalid_refresh_token_format",
+          error_message="Format refresh token tidak wajar (memuat spasi atau karakter ilegal).",
+      )
+
+    # Validasi token ke endpoint OAuth Google
+    try:
+      token_resp = self.oauth.exchange_refresh_token(clean_rt)
+    except Exception as oauth_exc:
+      err_code = getattr(oauth_exc, "code", "oauth_failed")
+      err_desc = getattr(oauth_exc, "description", str(oauth_exc))
+      if err_code == "invalid_grant":
+        msg = "Refresh token telah dicabut atau kedaluwarsa (invalid_grant). Silakan login ulang."
+      elif err_code == "unauthorized_client":
+        msg = "Token bukan milik client Antigravity (unauthorized_client). Silakan login ulang."
+      else:
+        msg = f"Gagal memvalidasi token ke Google: {err_code} - {err_desc}"
+
+      return ApplyPlan(
+          account_snapshot=account,
+          target=canonical_target,
+          target_available=False,
+          detected_sessions=sessions,
+          requires_confirmation=requires_confirmation,
+          error_code=err_code,
+          error_message=msg,
+      )
+
+    # Respons wajib memuat access_token
+    access_token = getattr(token_resp, "access_token", None) or (
+        token_resp.get("access_token") if isinstance(token_resp, dict) else None
+    )
+    if not access_token:
+      return ApplyPlan(
+          account_snapshot=account,
+          target=canonical_target,
+          target_available=False,
+          detected_sessions=sessions,
+          requires_confirmation=requires_confirmation,
+          error_code="missing_access_token",
+          error_message="Respons server token Google tidak memuat access_token.",
+      )
+
+    # id_token dan email di dalamnya wajib ada dan sama (case-insensitive) dengan email akun
+    id_token = getattr(token_resp, "id_token", None) or (
+        token_resp.get("id_token") if isinstance(token_resp, dict) else None
+    )
+    token_email = getattr(token_resp, "email", None)
+    if not token_email and id_token:
+      token_email = _decode_id_token_email(id_token)
+
+    if not id_token or not token_email:
+      return ApplyPlan(
+          account_snapshot=account,
+          target=canonical_target,
+          target_available=False,
+          detected_sessions=sessions,
+          requires_confirmation=requires_confirmation,
+          error_code="missing_id_token_email",
+          error_message="Respons token Google tidak memuat id_token atau klaim email.",
+      )
+
+    if token_email.strip().lower() != email.strip().lower():
+      return ApplyPlan(
+          account_snapshot=account,
+          target=canonical_target,
+          target_available=False,
+          detected_sessions=sessions,
+          requires_confirmation=requires_confirmation,
+          error_code="email_mismatch",
+          error_message=f"Email pada token ({token_email}) tidak cocok dengan email akun ({email}).",
+      )
+
+    # Bungkus hasil validasi token ke dict terstruktur
+    validated_token_data = {
+        "access_token": access_token,
+        "token_type": getattr(token_resp, "token_type", "Bearer") or "Bearer",
+        "refresh_token": getattr(token_resp, "refresh_token", None) or clean_rt,
+        "expires_in": int(getattr(token_resp, "expires_in", 3600) or 3600),
+        "expiry": float(getattr(token_resp, "expiry", self.clock.now() + 3600) or (self.clock.now() + 3600)),
+        "id_token": id_token,
+        "email": token_email,
+    }
+
     return ApplyPlan(
         account_snapshot=account,
         target=canonical_target,
         target_available=True,
+        validated_token=validated_token_data,
         detected_sessions=sessions,
         requires_confirmation=requires_confirmation,
     )
@@ -349,12 +483,231 @@ class AntigravityFacade:
             action_suggestion="Tutup sesi agy dan coba lagi. Tidak ada perubahan yang ditulis.",
         )
 
-    # Pada tiket 07, alur pengelolaan sesi selesai. Tiket 09 akan melanjutkan ke snapshot & tulis.
-    email = plan.account_snapshot.get("email")
+    # 2. Snapshot backup keyring & file ~/.gemini sebelum penulisan
+    email = str(plan.account_snapshot.get("email", "")).strip()
+    account_id = plan.account_snapshot.get("id")
+    token_data = plan.validated_token or {}
+    write_gemini_files = kwargs.get("write_gemini_files", True)
+
+    # Baca payload keyring lama jika ada
+    old_keyring_payload = None
+    try:
+      old_keyring_payload = self.keyring.read(KEYRING_SERVICE, KEYRING_USERNAME)
+    except Exception as kr_read_exc:
+      logger.warning("Gagal membaca keyring saat snapshot: %s", kr_read_exc)
+
+    gemini_dir = getattr(self.gemini_files, "gemini_dir", None)
+    backup_dir = None
+    backup_location = ""
+    try:
+      backup_dir = create_cli_backup(
+          keyring_payload=old_keyring_payload,
+          gemini_dir=gemini_dir,
+          email=email,
+          clock_now=self.clock.now(),
+      )
+      backup_location = str(backup_dir)
+    except Exception as bkp_exc:
+      logger.warning("Gagal membuat snapshot CLI backup: %s", bkp_exc)
+
+    # Fungsi pembantu untuk rollback bila ada langkah berikutnya yang gagal
+    def _perform_rollback():
+      if backup_dir:
+        try:
+          rollback_from_backup(
+              backup_dir=backup_dir,
+              keyring_port=self.keyring,
+              gemini_dir=gemini_dir,
+              opencode_file_path=None,
+          )
+        except Exception as rb_exc:
+          logger.error("Gagal melakukan rollback otomatis CLI: %s", rb_exc)
+
+    # 3. Bentuk dan tulis payload keyring
+    existing_auth_method = "consumer"
+    existing_writer_id = None
+    if old_keyring_payload:
+      try:
+        old_data = json.loads(old_keyring_payload.decode("utf-8"))
+        if isinstance(old_data, dict):
+          if "auth_method" in old_data:
+            existing_auth_method = old_data["auth_method"]
+          if "writer_id" in old_data:
+            existing_writer_id = old_data["writer_id"]
+      except Exception:
+        pass
+
+    if not existing_writer_id:
+      existing_writer_id = secrets.token_urlsafe(32)
+
+    now_wall = self.clock.now()
+    expiry_rfc3339 = _format_rfc3339_with_skew(now_wall, 30.0)
+    access_token = token_data.get("access_token", "")
+    refresh_token = token_data.get("refresh_token", "")
+    token_type = token_data.get("token_type", "Bearer")
+    expires_in = token_data.get("expires_in", 3600)
+    id_token = token_data.get("id_token")
+
+    keyring_payload_dict = {
+        "token": {
+            "access_token": access_token,
+            "token_type": token_type,
+            "refresh_token": refresh_token,
+            "expiry": expiry_rfc3339,
+            "expires_in": expires_in,
+        },
+        "auth_method": existing_auth_method,
+        "id_token_email": email,
+        "writer_id": existing_writer_id,
+    }
+    keyring_bytes = json.dumps(keyring_payload_dict, indent=2).encode("utf-8")
+
+    try:
+      self.keyring.write(KEYRING_SERVICE, KEYRING_USERNAME, keyring_bytes)
+    except Exception as kw_exc:
+      logger.exception("Gagal menulis keyring gemini/antigravity")
+      _perform_rollback()
+      return ApplyResult(
+          status=ApplyStatus.FAILED,
+          code="keyring_write_failed",
+          user_message=f"Gagal menulis kredensial ke keyring: {kw_exc}. Perubahan telah di-rollback.",
+          action_suggestion="Periksa status Secret Service / Keyring Linux.",
+          backup_location=backup_location,
+      )
+
+    # 4. Tulis file ~/.gemini (bila write_gemini_files aktif)
+    if write_gemini_files:
+      # 4a. oauth_creds.json
+      expiry_date_ms = int((now_wall + expires_in) * 1000)
+      oauth_creds_dict = {
+          "access_token": access_token,
+          "scope": "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile openid",
+          "token_type": token_type,
+          "id_token": id_token,
+          "expiry_date": expiry_date_ms,
+          "refresh_token": refresh_token,
+      }
+      try:
+        self.gemini_files.write_oauth_creds(oauth_creds_dict)
+      except Exception as ow_exc:
+        logger.exception("Gagal menulis ~/.gemini/oauth_creds.json")
+        _perform_rollback()
+        return ApplyResult(
+            status=ApplyStatus.FAILED,
+            code="gemini_write_failed",
+            user_message=f"Gagal menulis ~/.gemini/oauth_creds.json: {ow_exc}. Perubahan telah di-rollback.",
+            action_suggestion="Periksa izin penulisan folder ~/.gemini.",
+            backup_location=backup_location,
+        )
+
+      # 4b. google_accounts.json
+      old_accounts_data = None
+      try:
+        old_accounts_data = self.gemini_files.read_google_accounts()
+      except Exception:
+        pass
+
+      old_emails_list: List[str] = []
+      old_active_email: Optional[str] = None
+      if isinstance(old_accounts_data, dict):
+        old_active_email = old_accounts_data.get("active")
+        if isinstance(old_accounts_data.get("old"), list):
+          old_emails_list.extend(str(e) for e in old_accounts_data["old"] if e)
+
+      if old_active_email and old_active_email not in old_emails_list:
+        old_emails_list.append(old_active_email)
+
+      # Gabungan unik, tidak termasuk email baru
+      clean_email = email.strip()
+      unique_old: List[str] = []
+      for e in old_emails_list:
+        clean_e = e.strip()
+        if clean_e.lower() != clean_email.lower() and clean_e not in unique_old:
+          unique_old.append(clean_e)
+
+      google_accounts_dict = {
+          "active": clean_email,
+          "old": unique_old,
+      }
+      try:
+        self.gemini_files.write_google_accounts(google_accounts_dict)
+      except Exception as gw_exc:
+        logger.exception("Gagal menulis ~/.gemini/google_accounts.json")
+        _perform_rollback()
+        return ApplyResult(
+            status=ApplyStatus.FAILED,
+            code="gemini_write_failed",
+            user_message=f"Gagal menulis ~/.gemini/google_accounts.json: {gw_exc}. Perubahan telah di-rollback.",
+            action_suggestion="Periksa izin penulisan folder ~/.gemini.",
+            backup_location=backup_location,
+        )
+
+    # 5. Verifikasi: baca ulang keyring dan file
+    try:
+      verified_kr = self.keyring.read(KEYRING_SERVICE, KEYRING_USERNAME)
+      if not verified_kr:
+        raise ValueError("Keyring kosong setelah penulisan")
+      v_data = json.loads(verified_kr.decode("utf-8"))
+      v_token = v_data.get("token", {})
+      v_email = v_data.get("id_token_email")
+      v_rt = v_token.get("refresh_token")
+      if not v_email or v_email.strip().lower() != email.lower():
+        raise ValueError(f"Email pada keyring ({v_email}) tidak cocok dengan {email}")
+      if not v_rt or v_rt != refresh_token:
+        raise ValueError("Refresh token pada keyring tidak cocok")
+
+      if write_gemini_files:
+        v_creds = self.gemini_files.read_oauth_creds()
+        if not v_creds or v_creds.get("refresh_token") != refresh_token:
+          raise ValueError("File oauth_creds.json tidak sinkron dengan refresh token baru")
+        v_accs = self.gemini_files.read_google_accounts()
+        if not v_accs or str(v_accs.get("active", "")).strip().lower() != email.lower():
+          raise ValueError("File google_accounts.json tidak menunjuk email aktif yang sesuai")
+    except Exception as vf_exc:
+      logger.exception("Verifikasi hasil Apply CLI gagal")
+      _perform_rollback()
+      return ApplyResult(
+          status=ApplyStatus.FAILED,
+          code="verification_failed",
+          user_message=f"Verifikasi pembacaan ulang gagal: {vf_exc}. Perubahan telah di-rollback.",
+          action_suggestion="Coba jalankan Apply kembali atau periksa integritas keyring/file.",
+          backup_location=backup_location,
+      )
+
+    # 6. Pembaruan refresh token hasil rotasi di DB (bila berbeda dari snapshot)
+    orig_rt = (plan.account_snapshot.get("refresh_token") or "").strip()
+    if account_id and refresh_token and refresh_token != orig_rt:
+      try:
+        pwd = kwargs.get("password", "")
+        self.account_storage.update_refresh_token(account_id, refresh_token, password=pwd)
+      except Exception as rot_exc:
+        logger.warning("Gagal memperbarui refresh token hasil rotasi di database: %s", rot_exc)
+
+    # 7. Tandai DB: applied_target='antigravity_cli' & last_applied_at=epoch detik
+    applied_time = int(self.clock.now())
+    try:
+      if account_id:
+        self.account_storage.mark_applied(account_id, TARGET_ANTIGRAVITY_CLI, applied_at=applied_time)
+    except Exception as db_exc:
+      logger.warning("Gagal menandai applied CLI di database: %s", db_exc)
+      _perform_rollback()
+      return ApplyResult(
+          status=ApplyStatus.FAILED,
+          code="db_mark_failed",
+          user_message=f"Gagal memperbarui status di database: {db_exc}. Perubahan telah di-rollback.",
+          action_suggestion="Periksa koneksi database.",
+          backup_location=backup_location,
+      )
+
+    # 8. Bersihkan backup lama (retensi 30)
+    cleanup_old_backups(max_keep=30)
+
+    time_str = datetime.datetime.fromtimestamp(applied_time).astimezone().strftime("%Y-%m-%d %H:%M:%S")
     return ApplyResult(
         status=ApplyStatus.SUCCESS,
-        user_message=f"Sesi agy bersih. Kesiapan apply CLI terverifikasi untuk {email}.",
+        user_message=f"Akun {email} berhasil diterapkan ke Antigravity CLI pada {time_str}.\nLokasi backup: {backup_location}",
         email=email,
+        backup_location=backup_location,
     )
 
   def _apply_opencode(self, plan: ApplyPlan) -> ApplyResult:

@@ -65,17 +65,21 @@ class DummyAccountStorage:
 
 
 class DummyGeminiFiles:
+  def __init__(self):
+    self.oauth_creds = None
+    self.google_accounts = None
+
   def read_oauth_creds(self):
-    return None
+    return self.oauth_creds
 
   def write_oauth_creds(self, creds):
-    pass
+    self.oauth_creds = dict(creds)
 
   def read_google_accounts(self):
-    return None
+    return self.google_accounts
 
   def write_google_accounts(self, accs):
-    pass
+    self.google_accounts = dict(accs)
 
 
 class DummyOpenCodeFile:
@@ -357,12 +361,15 @@ def test_facade_build_plan_and_apply_process_integration(tmp_path: Path):
       excluded_pids=(),
   )
 
+  fake_oauth = FakeOAuth(fake_clock)
+  fake_oauth.respond_for("user@example.com", refresh_token="rt_12345")
+
   facade = AntigravityFacade(
       account_storage=DummyAccountStorage(),
       keyring=FakeKeyring(),
       gemini_files=DummyGeminiFiles(),
       opencode_file=DummyOpenCodeFile(),
-      oauth=FakeOAuth(fake_clock),
+      oauth=fake_oauth,
       process_manager=proc_mgr,
       environment=DummyEnvironment(),
       clock=fake_clock,

@@ -5,6 +5,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QIcon, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
+    QDialog,
     QInputDialog,
     QMainWindow,
     QMessageBox,
@@ -507,49 +508,97 @@ class MainWindow(QMainWindow):
 
     effective_target = target if target else self.config_bar.get_active_target()
     pwd = self._get_encryption_password()
+    auto_kill = self.settings.value("auto_kill_agy", False)
+    if isinstance(auto_kill, str):
+      auto_kill = auto_kill.lower() in ("true", "1")
+    write_gemini = self.settings.value("write_gemini_files", True)
+    if isinstance(write_gemini, str):
+      write_gemini = write_gemini.lower() in ("true", "1")
 
-    def task():
-      plan = self.facade.build_plan(account_id, effective_target, password=pwd)
+    def plan_task():
+      return self.facade.build_plan(
+          account_id,
+          effective_target,
+          password=pwd,
+          auto_kill_agy=auto_kill,
+      )
+
+    def on_plan_success(plan):
       if plan.error_code:
-        return plan, None
-      result = self.facade.apply(plan)
-      return plan, result
-
-    def on_success(res):
-      plan, apply_result = res
-      if plan.error_code or (apply_result and apply_result.status.value == "FAILED"):
-        err_msg = plan.error_message if plan.error_code else apply_result.user_message
-        suggestion = apply_result.action_suggestion if apply_result else ""
-        backup_loc = apply_result.backup_location if apply_result else ""
-        parts = [err_msg]
-        if suggestion:
-          parts.append(suggestion)
-        if backup_loc:
-          parts.append(f"Lokasi backup snapshot: {backup_loc}")
-        full_msg = "\n\n".join(parts)
+        full_msg = plan.error_message or "Plan tidak valid"
         QMessageBox.warning(self, "Gagal Menerapkan Akun", full_msg)
         return
 
-      if apply_result and apply_result.status.value == "SUCCESS":
-        target_name = "OpenCode" if effective_target == "opencode" else "Antigravity CLI"
-        accounts_cnt = apply_result.accounts_count
-        count_str = f" ({accounts_cnt} akun di file)" if accounts_cnt is not None else ""
-        QMessageBox.information(
-            self,
-            "Berhasil Menerapkan Akun",
-            f"Akun <b>{apply_result.email}</b> berhasil diterapkan ke <b>{target_name}</b>{count_str}!",
-        )
-        self.reload_accounts()
+      # Cek apakah butuh konfirmasi penghentian sesi agy
+      allow_kill = False
+      if plan.requires_confirmation and plan.detected_sessions:
+        from src.ui.components.agy_session_dialog import AgyConfirmDialog
+        confirm_dlg = AgyConfirmDialog(plan.detected_sessions, self, settings=self.settings)
+        if confirm_dlg.exec() != QDialog.DialogCode.Accepted:
+          return
+        allow_kill = True
+      elif auto_kill:
+        allow_kill = True
 
-    def on_failed(e):
-      QMessageBox.critical(self, "Error", f"Terjadi kesalahan saat menerapkan akun:\n\n{str(e)}")
+      # Eksekusi Apply
+      def apply_task():
+        return self.facade.apply(
+            plan,
+            allow_kill=allow_kill,
+            write_gemini_files=write_gemini,
+            password=pwd,
+        )
+
+      def on_apply_success(apply_result):
+        if not apply_result:
+          return
+        if apply_result.status.value == "CANCELLED":
+          QMessageBox.information(self, "Dibatalkan", apply_result.user_message)
+          return
+        if apply_result.status.value == "FAILED":
+          parts = [apply_result.user_message]
+          if apply_result.action_suggestion:
+            parts.append(apply_result.action_suggestion)
+          if apply_result.backup_location:
+            parts.append(f"Lokasi backup snapshot: {apply_result.backup_location}")
+          full_msg = "\n\n".join(parts)
+          QMessageBox.warning(self, "Gagal Menerapkan Akun", full_msg)
+          return
+
+        if apply_result.status.value == "SUCCESS":
+          target_name = "OpenCode" if effective_target == "opencode" else "Antigravity CLI"
+          accounts_cnt = apply_result.accounts_count
+          count_str = f" ({accounts_cnt} akun di file)" if accounts_cnt is not None else ""
+          backup_info = ""
+          if apply_result.backup_location:
+            backup_info = f"\n<br><small>Lokasi backup: {apply_result.backup_location}</small>"
+          QMessageBox.information(
+              self,
+              "Berhasil Menerapkan Akun",
+              f"Akun <b>{apply_result.email}</b> berhasil diterapkan ke <b>{target_name}</b>{count_str}!{backup_info}",
+          )
+          self.reload_accounts()
+
+      def on_apply_failed(e):
+        QMessageBox.critical(self, "Error", f"Terjadi kesalahan saat menerapkan akun:\n\n{str(e)}")
+
+      self.run_async_task(
+          "Menerapkan Akun",
+          f"Menerapkan akun ke {effective_target}...",
+          apply_task,
+          on_apply_success,
+          on_apply_failed,
+      )
+
+    def on_plan_failed(e):
+      QMessageBox.critical(self, "Error", f"Terjadi kesalahan saat memeriksa akun:\n\n{str(e)}")
 
     self.run_async_task(
-        "Menerapkan Akun",
-        f"Menerapkan akun ke target {effective_target}...",
-        task,
-        on_success,
-        on_failed,
+        "Menyiapkan Akun",
+        f"Memeriksa akun dan memvalidasi token...",
+        plan_task,
+        on_plan_success,
+        on_plan_failed,
     )
 
   # ─── Restore Backup Terakhir ───
