@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import time
 from typing import Optional
 from src.crypto import (
     create_encryption_canary,
@@ -9,6 +10,7 @@ from src.crypto import (
     encrypt_value,
     verify_encryption_canary,
 )
+from src.targets import TARGET_OPENCODE, normalize_target
 from src.turso_client import TursoClient
 
 
@@ -56,6 +58,8 @@ class AccountDatabase:
             is_encrypted INTEGER NOT NULL DEFAULT 0,
             enc_check TEXT,
             category TEXT DEFAULT '',
+            applied_target TEXT NULL,
+            last_applied_at INTEGER NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """
@@ -111,6 +115,14 @@ class AccountDatabase:
           self.turso_client.execute("ALTER TABLE accounts ADD COLUMN category TEXT DEFAULT ''")
         except Exception:
           pass
+        try:
+          self.turso_client.execute("ALTER TABLE accounts ADD COLUMN applied_target TEXT NULL")
+        except Exception:
+          pass
+        try:
+          self.turso_client.execute("ALTER TABLE accounts ADD COLUMN last_applied_at INTEGER NULL")
+        except Exception:
+          pass
       except Exception:
         # Jika database offline / belum terhubung saat startup, abaikan agar tidak crash
         pass
@@ -131,6 +143,10 @@ class AccountDatabase:
           cursor.execute("ALTER TABLE accounts ADD COLUMN enc_check TEXT;")
         if "category" not in columns:
           cursor.execute("ALTER TABLE accounts ADD COLUMN category TEXT DEFAULT '';")
+        if "applied_target" not in columns:
+          cursor.execute("ALTER TABLE accounts ADD COLUMN applied_target TEXT NULL;")
+        if "last_applied_at" not in columns:
+          cursor.execute("ALTER TABLE accounts ADD COLUMN last_applied_at INTEGER NULL;")
         conn.commit()
 
   def _prepare_account_record(
@@ -439,6 +455,80 @@ class AccountDatabase:
         conn.commit()
         return cursor.rowcount > 0
 
+  def mark_applied(
+      self,
+      account_id: str,
+      target: str,
+      applied_at: Optional[int] = None,
+  ) -> bool:
+    """Menandai target terakhir yang diterapkan dan waktu audit akun (epoch detik UTC)."""
+    canonical_target = normalize_target(target)
+    epoch_seconds = int(applied_at if applied_at is not None else time.time())
+
+    query = "UPDATE accounts SET applied_target = ?, last_applied_at = ? WHERE id = ?"
+    params = [canonical_target, epoch_seconds, account_id]
+
+    if self.use_turso and self.turso_client:
+      _, affected = self.turso_client.execute(query, params)
+      return affected > 0
+    else:
+      with self.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        conn.commit()
+        return cursor.rowcount > 0
+
+  def update_refresh_token(
+      self,
+      account_id: str,
+      new_refresh_token: str,
+      password: str = "",
+  ) -> bool:
+    """Memperbarui refresh token hasil rotasi dengan menghormati status enkripsi akun."""
+    if not new_refresh_token:
+      raise ValueError("Refresh token baru tidak boleh kosong.")
+
+    # Cek status enkripsi akun saat ini
+    check_query = "SELECT is_encrypted, enc_check FROM accounts WHERE id = ?"
+    if self.use_turso and self.turso_client:
+      rows, _ = self.turso_client.execute(check_query, [account_id])
+      if not rows:
+        return False
+      is_encrypted = bool(rows[0][0])
+      enc_check = rows[0][1]
+    else:
+      with self.get_connection() as conn:
+        cursor = conn.cursor()
+        row = cursor.execute(check_query, (account_id,)).fetchone()
+        if not row:
+          return False
+        is_encrypted = bool(row[0])
+        enc_check = row[1]
+
+    if is_encrypted:
+      if not password:
+        raise ValueError(
+            "Akun ini terenkripsi. Password enkripsi diperlukan untuk memperbarui refresh token."
+        )
+      if enc_check and not verify_encryption_canary(enc_check, password):
+        raise ValueError(
+            "Password enkripsi salah. Pembaruan refresh token dibatalkan demi keamanan."
+        )
+      stored_rt = encrypt_value(new_refresh_token, password)
+    else:
+      stored_rt = new_refresh_token
+
+    update_query = "UPDATE accounts SET refresh_token = ? WHERE id = ?"
+    if self.use_turso and self.turso_client:
+      _, affected = self.turso_client.execute(update_query, [stored_rt, account_id])
+      return affected > 0
+    else:
+      with self.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(update_query, (stored_rt, account_id))
+        conn.commit()
+        return cursor.rowcount > 0
+
   def rename_category(self, old_name: str, new_name: str) -> int:
     """Mengubah nama kategori untuk semua akun dari old_name menjadi new_name."""
     clean_old = old_name.strip() if old_name else ""
@@ -546,7 +636,7 @@ class AccountDatabase:
         return [r[0] for r in rows if r and r[0]]
 
   def fetch_accounts_summary(self):
-    """Mengambil Email, Reset Time, Remaining Fraction per model, Status Enkripsi, dan Kategori untuk keperluan UI."""
+    """Mengambil Email, Reset Time, Remaining Fraction per model, Status Enkripsi, Kategori, serta Kolom Audit (applied_target, last_applied_at) untuk keperluan UI."""
     query = """
         SELECT 
             a.id,
@@ -559,7 +649,9 @@ class AccountDatabase:
             MAX(CASE WHEN q.model_name = 'claude' THEN q.remaining_fraction END) AS claude_frac,
             a.is_encrypted,
             a.enc_check,
-            COALESCE(a.category, '') AS category
+            COALESCE(a.category, '') AS category,
+            a.applied_target,
+            a.last_applied_at
         FROM accounts a
         LEFT JOIN account_quotas q ON a.id = q.account_id
         GROUP BY a.id
@@ -582,7 +674,8 @@ class AccountDatabase:
     query_acc = """
         SELECT id, refresh_token, project_id, email, enabled, added_at,
                 last_used, verification_required, managed_project_id, cached_quota_updated_at,
-                is_encrypted, rate_limit_reset_times, enc_check, COALESCE(category, '')
+                is_encrypted, rate_limit_reset_times, enc_check, COALESCE(category, ''),
+                applied_target, last_applied_at
         FROM accounts WHERE id = ?
     """
     query_fp = """
@@ -717,6 +810,8 @@ class AccountDatabase:
       }
 
     cat_val = acc_row[13] if len(acc_row) > 13 and acc_row[13] else ""
+    applied_target_val = acc_row[14] if len(acc_row) > 14 else None
+    last_applied_at_val = acc_row[15] if len(acc_row) > 15 else None
 
     account_json = {
         "id": acc_row[0],
@@ -724,6 +819,8 @@ class AccountDatabase:
         "projectId": final_project_id,
         "email": acc_row[3],
         "category": cat_val,
+        "appliedTarget": applied_target_val,
+        "lastAppliedAt": last_applied_at_val,
         "enabled": bool(final_enabled),
         "addedAt": final_added_at,
         "lastUsed": final_last_used,
