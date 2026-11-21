@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import QMenu, QSizePolicy, QToolButton
 
 from src.targets import (
     ALL_TARGETS,
+    TARGET_OPENCODE,
     create_settings,
     load_active_target,
     normalize_target,
@@ -41,6 +42,7 @@ class TargetBadge(QToolButton):
     self._settings = settings if settings is not None else create_settings()
     self._target = load_active_target(self._settings)
     self._actions: dict[str, QAction] = {}
+    self._target_status = None
 
     self.setObjectName("targetBadge")
     self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
@@ -85,6 +87,12 @@ class TargetBadge(QToolButton):
       self.target_changed.emit(canonical)
     return canonical
 
+  def set_status(self, status) -> None:
+    """Menyetel status target aktif dan memperbarui badge serta tooltip."""
+    self._target_status = status
+    self._update_display()
+    self.updateGeometry()
+
   # ─── Internal ───
 
   def _build_menu(self) -> None:
@@ -108,7 +116,64 @@ class TargetBadge(QToolButton):
       action.setChecked(target == self._target)
 
   def _full_label(self) -> str:
-    return f"🎯 Target: {target_label(self._target)}"
+    prefix = f"🎯 Target: {target_label(self._target)}"
+    if not self._target_status:
+      return prefix
+
+    cond = getattr(self._target_status, "condition", None)
+    email = getattr(self._target_status, "email", None)
+
+    # Nilai kondisi bisa berupa string atau enum
+    cond_val = cond.value if hasattr(cond, "value") else str(cond or "")
+
+    if cond_val == "active":
+      return f"{prefix} • 🟢 {email}" if email else f"{prefix} • 🟢 Aktif"
+    elif cond_val == "unrecorded":
+      return f"{prefix} • 🟡 Tidak tercatat"
+    elif cond_val == "invalid_file":
+      return f"{prefix} • 🔴 File tidak valid"
+    elif cond_val == "none":
+      return f"{prefix} • ⚪ Belum login"
+    elif cond_val == "drift_gemini":
+      return f"{prefix} • 🟡 Drift (~/.gemini)"
+    elif cond_val == "unavailable":
+      return f"{prefix} • ⛔ Tidak tersedia"
+    elif cond_val == "locked":
+      return f"{prefix} • 🔒 Keyring terkunci"
+    elif cond_val == "error":
+      return f"{prefix} • 🔴 Error"
+    return prefix
+
+  def _full_tooltip(self) -> str:
+    lines = [self._full_label()]
+    if not self._target_status:
+      return lines[0]
+
+    email = getattr(self._target_status, "email", None)
+    if email:
+      lines.append(f"Email Aktif: {email}")
+
+    cond = getattr(self._target_status, "condition", None)
+    cond_val = cond.value if hasattr(cond, "value") else str(cond or "")
+    lines.append(f"Kondisi: {cond_val}")
+
+    msg = getattr(self._target_status, "message", None)
+    if msg:
+      lines.append(f"Keterangan: {msg}")
+
+    unavail = getattr(self._target_status, "unavailable_reason", None)
+    if unavail:
+      lines.append(f"Alasan: {unavail}")
+
+    sessions = getattr(self._target_status, "sessions_summary", None)
+    if sessions:
+      lines.append(f"Sesi agy: {sessions}")
+
+    err = getattr(self._target_status, "error", None)
+    if err:
+      lines.append(f"Error: {err}")
+
+    return "\n".join(lines)
 
   def _update_display(self) -> None:
     full_text = self._full_label()
@@ -127,4 +192,4 @@ class TargetBadge(QToolButton):
     else:
       text = full_text
     self.setText(text)
-    self.setToolTip(full_text)
+    self.setToolTip(self._full_tooltip())

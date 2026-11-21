@@ -37,6 +37,7 @@ class AccountTableWidget(QWidget):
     self._raw_account_rows = []
     self._current_password = ""
     self._saved_category_selection = "__ALL__"
+    self._overall_status = None
     self.init_ui()
 
   def init_ui(self):
@@ -86,12 +87,14 @@ class AccountTableWidget(QWidget):
     control_layout.addWidget(label_sort)
     control_layout.addWidget(self.cmb_sort_mode)
 
-    # Tabel Akun (6 Kolom)
+    # Tabel Akun (7 Kolom)
+    # Urutan: Email, Kategori, Aktif di, Status Enkripsi, Flash Quota, Pro Quota, Claude Quota
     self.table = QTableWidget()
-    self.table.setColumnCount(6)
+    self.table.setColumnCount(7)
     self.table.setHorizontalHeaderLabels([
         "Email",
         "Kategori",
+        "Aktif di",
         "Status Enkripsi",
         "Flash Quota (Reset)",
         "Pro Quota (Reset)",
@@ -101,9 +104,13 @@ class AccountTableWidget(QWidget):
     header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
     header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
     header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-    header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+    header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
     header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
     header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+    header.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+
+    # Kolom 'Aktif di' (indeks 2) dibatasi lebar maksimum ~110 px
+    header.setMaximumSectionSize(110)
 
     self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
     self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
@@ -171,10 +178,12 @@ class AccountTableWidget(QWidget):
 
     self.cmb_category_filter.blockSignals(False)
 
-  def set_accounts_data(self, rows, current_password: str = ""):
+  def set_accounts_data(self, rows, current_password: str = "", overall_status=None):
     """Menyimpan data mentah dari fetch_accounts_summary() dan memperbarui tampilan."""
     self._raw_account_rows = rows or []
     self._current_password = current_password
+    if overall_status is not None:
+      self._overall_status = overall_status
 
     # Otomatis perbarui kategori unik yang aktif ada di data
     active_cats = sorted(list({
@@ -184,6 +193,11 @@ class AccountTableWidget(QWidget):
     }), key=lambda s: s.lower())
     self.update_filter_categories(active_cats)
 
+    self._render_table()
+
+  def set_overall_status(self, overall_status):
+    """Memperbarui overall_status dan me-render ulang kolom 'Aktif di'."""
+    self._overall_status = overall_status
     self._render_table()
 
   def _sort_items(self, item_list: list):
@@ -277,10 +291,18 @@ class AccountTableWidget(QWidget):
 
       min_reset_ts = min(p_flash[4], p_pro[4], p_claude[4])
 
+      # Hitung nilai kolom 'Aktif di'
+      from src.integrations.antigravity.service import compute_active_di
+      if self._overall_status is not None:
+        active_di = compute_active_di(email, self._overall_status)
+      else:
+        active_di = "—"
+
       parsed_list.append({
           "acc_id": acc_id,
           "email": email or "-",
           "category": cat,
+          "active_di": active_di,
           "enc_status_text": enc_status_text,
           "enc_status_color": enc_status_color,
           "enc_status_tooltip": enc_status_tooltip,
@@ -330,14 +352,14 @@ class AccountTableWidget(QWidget):
         sep_item.setFlags(Qt.ItemFlag.ItemIsEnabled)  # Bukan untuk diedit / diseleksi
 
         self.table.setItem(current_row, 0, sep_item)
-        for c in range(1, 6):
+        for c in range(1, 7):
           empty_sep = QTableWidgetItem("")
           empty_sep.setData(Qt.ItemDataRole.UserRole, self.SEPARATOR_ROLE_VALUE)
           empty_sep.setBackground(QBrush(QColor("#334155")))
           empty_sep.setFlags(Qt.ItemFlag.ItemIsEnabled)
           self.table.setItem(current_row, c, empty_sep)
 
-        self.table.setSpan(current_row, 0, 1, 6)
+        self.table.setSpan(current_row, 0, 1, 7)
         self.table.setRowHeight(current_row, 32)
         current_row += 1
 
@@ -358,7 +380,7 @@ class AccountTableWidget(QWidget):
         self._populate_account_row(current_row, item_data)
 
   def _populate_account_row(self, row_idx: int, item_data: dict):
-    """Mengisi satu baris akun dengan 6 kolom."""
+    """Mengisi satu baris akun dengan 7 kolom."""
     p_flash = item_data["flash"]
     p_pro = item_data["pro"]
     p_claude = item_data["claude"]
@@ -374,7 +396,18 @@ class AccountTableWidget(QWidget):
     item_cat.setData(Qt.ItemDataRole.UserRole, item_data["category"])
     item_cat.setForeground(QBrush(QColor("#1a73e8" if item_data["category"] else "#888888")))
 
-    # 2: Status Enkripsi
+    # 2: Aktif di
+    active_di_text = item_data.get("active_di", "—")
+    item_active_di = QTableWidgetItem(active_di_text)
+    if active_di_text != "—":
+      item_active_di.setForeground(QBrush(QColor("#137333")))
+      font_active = item_active_di.font()
+      font_active.setBold(True)
+      item_active_di.setFont(font_active)
+    else:
+      item_active_di.setForeground(QBrush(QColor("#888888")))
+
+    # 3: Status Enkripsi
     item_enc_status = QTableWidgetItem(item_data["enc_status_text"])
     item_enc_status.setForeground(QBrush(QColor(item_data["enc_status_color"])))
     item_enc_status.setToolTip(item_data["enc_status_tooltip"])
@@ -382,19 +415,19 @@ class AccountTableWidget(QWidget):
     font_status.setBold(True)
     item_enc_status.setFont(font_status)
 
-    # 3: Flash Quota
+    # 4: Flash Quota
     item_flash = QTableWidgetItem(p_flash[0])
     item_flash.setForeground(QBrush(QColor(p_flash[2])))
 
-    # 4: Pro Quota
+    # 5: Pro Quota
     item_pro = QTableWidgetItem(p_pro[0])
     item_pro.setForeground(QBrush(QColor(p_pro[2])))
 
-    # 5: Claude Quota
+    # 6: Claude Quota
     item_claude = QTableWidgetItem(p_claude[0])
     item_claude.setForeground(QBrush(QColor(p_claude[2])))
 
-    items = [item_email, item_cat, item_enc_status, item_flash, item_pro, item_claude]
+    items = [item_email, item_cat, item_active_di, item_enc_status, item_flash, item_pro, item_claude]
 
     for c, item in enumerate(items):
       item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)

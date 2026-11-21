@@ -64,6 +64,10 @@ class ConfigBarWidget(QWidget):
     """Pilih target, simpan ke QSettings, dan perbarui chip."""
     return self.target_badge.set_target(target)
 
+  def set_target_status(self, status) -> None:
+    """Memperbarui status kesehatan/akun aktif pada target chip."""
+    self.target_badge.set_status(status)
+
   def get_folder_path(self) -> str:
     return self.txt_folder_path.text().strip()
 

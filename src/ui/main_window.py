@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from src.database import AccountDatabase
+from src.integrations.antigravity.factory import create_facade
 from src.targets import create_settings
 from src.turso_client import TursoClient
 from src.ui.components import (
@@ -34,6 +35,7 @@ class MainWindow(QMainWindow):
     super().__init__()
     self.settings = create_settings()
     self.db = None
+    self.facade = None
     self._current_worker = None  # Mencegah garbage collection pada worker aktif
     self.init_ui()
     self.load_settings()
@@ -72,6 +74,7 @@ class MainWindow(QMainWindow):
     self.account_table.category_filter_changed.connect(self._on_category_filter_changed)
     self.account_table.manage_categories_requested.connect(self.open_category_management_dialog)
     self.account_table.bulk_change_category_requested.connect(self.bulk_change_account_category)
+    self.config_bar.target_changed.connect(self._on_target_changed)
     self.account_table.copy_requested.connect(self.copy_account_json)
     self.account_table.update_file_requested.connect(self.update_antigravity_file)
     self.account_table.update_db_requested.connect(self.update_db_from_antigravity)
@@ -185,6 +188,11 @@ class MainWindow(QMainWindow):
       self.db = AccountDatabase(use_turso=False)
       self.config_bar.set_db_status(use_turso=False)
 
+    self.facade = create_facade(
+        self.db,
+        lambda: self.config_bar.get_folder_path(),
+    )
+
   def _is_encryption_enabled(self) -> bool:
     val = self.settings.value("enable_encryption", False)
     if isinstance(val, str):
@@ -213,6 +221,15 @@ class MainWindow(QMainWindow):
   def _on_category_filter_changed(self, category_key: str):
     self.settings.setValue("selected_category_filter", category_key)
 
+  def _on_target_changed(self, target: str):
+    """Dipanggil saat target aktif diubah di ConfigBar."""
+    if self.facade:
+      try:
+        overall_status = self.facade.read_status()
+        self.config_bar.set_target_status(overall_status.get_status(target))
+      except Exception:
+        pass
+
   # ─── Reload Akun ───
 
   def reload_accounts(self):
@@ -225,13 +242,24 @@ class MainWindow(QMainWindow):
     def task():
       rows = self.db.fetch_accounts_summary()
       cats = self.db.fetch_categories()
-      return rows, cats
+      overall_status = None
+      if self.facade:
+        try:
+          overall_status = self.facade.read_status()
+        except Exception:
+          pass
+      return rows, cats, overall_status
 
     def on_success(result):
-      rows, cats = result
+      rows, cats, overall_status = result
       current_pwd = self._get_encryption_password()
-      self.account_table.set_accounts_data(rows or [], current_password=current_pwd)
+      self.account_table.set_accounts_data(
+          rows or [], current_password=current_pwd, overall_status=overall_status
+      )
       self.json_input.set_categories(cats or [])
+      if overall_status is not None:
+        active_target = self.config_bar.get_active_target()
+        self.config_bar.set_target_status(overall_status.get_status(active_target))
 
     def on_failed(e):
       self.account_table.set_accounts_data([], current_password="")
