@@ -220,7 +220,13 @@ class TargetBadge(QToolButton):
 
         sessions = getattr(self._target_status, "sessions_summary", None)
         if sessions:
-            lines.append(f"Sesi agy: {sessions}")
+            if isinstance(sessions, dict):
+                alive = sessions.get("alive", 0)
+                stopped = sessions.get("stopped", 0)
+                zombie = sessions.get("zombie", 0)
+                lines.append(f"Sesi agy: {alive} hidup, {stopped} stopped, {zombie} zombie")
+            else:
+                lines.append(f"Sesi agy: {sessions}")
 
         err = getattr(self._target_status, "error", None)
         if err:

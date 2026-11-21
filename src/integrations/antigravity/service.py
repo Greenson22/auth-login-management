@@ -936,7 +936,6 @@ class AntigravityFacade:
       )
 
   def _read_cli_status(self) -> TargetStatus:
-    # CLI status didukung bertahap; jika environment tidak mendukung atau tiket 10 belum aktif
     try:
       if not self.environment.is_linux():
         return TargetStatus(
@@ -981,13 +980,116 @@ class AntigravityFacade:
       except Exception as p_exc:
         logger.debug("Tidak dapat membaca ringkasan sesi agy: %s", p_exc)
 
-      # Jika dasar terpenuhi, kembalikan status NONE default jika belum dibaca tiket 10
-      return TargetStatus(
-          target=TARGET_ANTIGRAVITY_CLI,
-          condition=TargetCondition.NONE,
-          message="Belum login ke Antigravity CLI.",
-          sessions_summary=sessions_summary,
-      )
+      # Baca payload keyring
+      try:
+        kr_bytes = self.keyring.read(KEYRING_SERVICE, KEYRING_USERNAME)
+      except Exception as kr_exc:
+        logger.debug("Error saat membaca keyring untuk status CLI: %s", kr_exc)
+        return TargetStatus(
+            target=TARGET_ANTIGRAVITY_CLI,
+            condition=TargetCondition.ERROR,
+            message=f"Kesalahan membaca keyring: {kr_exc}",
+            sessions_summary=sessions_summary,
+            error=str(kr_exc),
+        )
+
+      if not kr_bytes:
+        return TargetStatus(
+            target=TARGET_ANTIGRAVITY_CLI,
+            email=None,
+            condition=TargetCondition.NONE,
+            message="Belum login ke Antigravity CLI.",
+            sessions_summary=sessions_summary,
+        )
+
+      try:
+        kr_data = json.loads(kr_bytes.decode("utf-8"))
+      except Exception as json_exc:
+        return TargetStatus(
+            target=TARGET_ANTIGRAVITY_CLI,
+            email=None,
+            condition=TargetCondition.ERROR,
+            message=f"Payload keyring tidak valid: {json_exc}",
+            sessions_summary=sessions_summary,
+            error=str(json_exc),
+        )
+
+      if not isinstance(kr_data, dict):
+        return TargetStatus(
+            target=TARGET_ANTIGRAVITY_CLI,
+            email=None,
+            condition=TargetCondition.NONE,
+            message="Belum login ke Antigravity CLI.",
+            sessions_summary=sessions_summary,
+        )
+
+      # Ekstrak email aktif dari payload keyring
+      keyring_email = kr_data.get("id_token_email")
+      if not keyring_email and isinstance(kr_data.get("token"), dict):
+        # Fallback decode id_token jika ada
+        id_token = kr_data["token"].get("id_token")
+        if id_token:
+          keyring_email = _decode_id_token_email(id_token)
+
+      if not keyring_email or not str(keyring_email).strip():
+        return TargetStatus(
+            target=TARGET_ANTIGRAVITY_CLI,
+            email=None,
+            condition=TargetCondition.NONE,
+            message="Payload keyring tidak memiliki email aktif.",
+            sessions_summary=sessions_summary,
+        )
+
+      keyring_email = str(keyring_email).strip()
+
+      # Periksa sinkronisasi dengan ~/.gemini (drift check)
+      # Status tetap menampilkan email keyring sebagai Active Account
+      gemini_email = None
+      if hasattr(self.gemini_files, "read_google_accounts"):
+        try:
+          g_accs = self.gemini_files.read_google_accounts()
+          if isinstance(g_accs, dict) and g_accs.get("active"):
+            gemini_email = str(g_accs["active"]).strip()
+        except Exception as g_exc:
+          logger.debug("Tidak dapat membaca google_accounts.json: %s", g_exc)
+
+      is_drift = False
+      if gemini_email and gemini_email.lower() != keyring_email.lower():
+        is_drift = True
+
+      if is_drift:
+        return TargetStatus(
+            target=TARGET_ANTIGRAVITY_CLI,
+            email=keyring_email,
+            condition=TargetCondition.DRIFT_GEMINI,
+            message=f"Drift terdeteksi: Keyring ({keyring_email}) berbeda dengan ~/.gemini ({gemini_email}).",
+            sessions_summary=sessions_summary,
+        )
+
+      # Periksa apakah email tercatat di database
+      exists_in_db = False
+      try:
+        exists_in_db = self.account_storage.account_exists(keyring_email)
+      except Exception as db_exc:
+        logger.warning("Gagal memeriksa akun CLI di storage: %s", db_exc)
+
+      if exists_in_db:
+        return TargetStatus(
+            target=TARGET_ANTIGRAVITY_CLI,
+            email=keyring_email,
+            condition=TargetCondition.ACTIVE,
+            message=f"Aktif: {keyring_email}",
+            sessions_summary=sessions_summary,
+        )
+      else:
+        return TargetStatus(
+            target=TARGET_ANTIGRAVITY_CLI,
+            email=keyring_email,
+            condition=TargetCondition.UNRECORDED,
+            message="Akun aktif di Keyring tidak tercatat di database.",
+            sessions_summary=sessions_summary,
+        )
+
     except Exception as exc:
       return TargetStatus(
           target=TARGET_ANTIGRAVITY_CLI,

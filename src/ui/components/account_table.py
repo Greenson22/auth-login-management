@@ -313,11 +313,28 @@ class AccountTableWidget(QWidget):
       else:
         active_di = "—"
 
+      applied_target = row_data[11] if len(row_data) > 11 else None
+      last_applied_at = row_data[12] if len(row_data) > 12 else None
+      audit_tooltip = ""
+      if applied_target or last_applied_at:
+        parts = []
+        if applied_target:
+          parts.append(f"Target terakhir: {applied_target}")
+        if last_applied_at:
+          import datetime
+          try:
+            t_str = datetime.datetime.fromtimestamp(last_applied_at).strftime("%Y-%m-%d %H:%M:%S")
+          except Exception:
+            t_str = str(last_applied_at)
+          parts.append(f"Waktu apply: {t_str}")
+        audit_tooltip = "Audit: " + " • ".join(parts)
+
       parsed_list.append({
           "acc_id": acc_id,
           "email": email or "-",
           "category": cat,
           "active_di": active_di,
+          "audit_tooltip": audit_tooltip,
           "enc_status_text": enc_status_text,
           "enc_status_color": enc_status_color,
           "enc_status_tooltip": enc_status_tooltip,
@@ -421,6 +438,10 @@ class AccountTableWidget(QWidget):
       item_active_di.setFont(font_active)
     else:
       item_active_di.setForeground(QBrush(QColor("#888888")))
+
+    audit_tip = item_data.get("audit_tooltip")
+    if audit_tip:
+      item_active_di.setToolTip(audit_tip)
 
     # 3: Status Enkripsi
     item_enc_status = QTableWidgetItem(item_data["enc_status_text"])
