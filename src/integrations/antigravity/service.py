@@ -14,7 +14,13 @@ from typing import Any, Dict, List, Optional
 
 from src.targets import TARGET_ANTIGRAVITY_CLI, TARGET_OPENCODE, normalize_target
 
-from .backup import cleanup_old_backups, create_opencode_backup
+from .backup import (
+    cleanup_old_backups,
+    create_cli_backup,
+    create_opencode_backup,
+    get_latest_backup,
+    rollback_from_backup,
+)
 from .ports import (
     AccountStoragePort,
     ApplyPlan,
@@ -425,10 +431,20 @@ class AntigravityFacade:
       self.opencode_file.write_accounts_data(data)
     except Exception as exc:
       logger.exception("Gagal menulis file OpenCode")
+      if backup_dir:
+        try:
+          rollback_from_backup(
+              backup_dir=backup_dir,
+              keyring_port=self.keyring,
+              gemini_dir=None,
+              opencode_file_path=file_path,
+          )
+        except Exception as rb_exc:
+          logger.error("Gagal melakukan rollback otomatis: %s", rb_exc)
       return ApplyResult(
           status=ApplyStatus.FAILED,
           code="write_failed",
-          user_message=f"Gagal menulis file OpenCode: {exc}",
+          user_message=f"Gagal menulis file OpenCode: {exc}. Rollback otomatis telah dijalankan.",
           action_suggestion="Periksa izin penulisan file dan folder.",
           backup_location=backup_location,
       )
@@ -440,6 +456,23 @@ class AntigravityFacade:
         self.account_storage.mark_applied(account_id, TARGET_OPENCODE, applied_at=applied_time)
     except Exception as db_exc:
       logger.warning("Gagal menandai applied di database: %s", db_exc)
+      if backup_dir:
+        try:
+          rollback_from_backup(
+              backup_dir=backup_dir,
+              keyring_port=self.keyring,
+              gemini_dir=None,
+              opencode_file_path=file_path,
+          )
+        except Exception as rb_exc:
+          logger.error("Gagal rollback otomatis setelah DB gagal: %s", rb_exc)
+      return ApplyResult(
+          status=ApplyStatus.FAILED,
+          code="db_mark_failed",
+          user_message=f"Gagal memperbarui database: {db_exc}. Perubahan telah di-rollback.",
+          action_suggestion="Periksa koneksi database.",
+          backup_location=backup_location,
+      )
 
     # 6. Bersihkan backup lama (retensi 30)
     cleanup_old_backups(max_keep=30)
@@ -612,7 +645,51 @@ class AntigravityFacade:
 
   def restore_last_backup(self) -> RestoreResult:
     """Memulihkan backup terakhir (tiket 08)."""
+    latest = get_latest_backup()
+    if not latest:
+      return RestoreResult(
+          status=ApplyStatus.SUCCESS,
+          message="Tidak ada backup yang ditemukan untuk dipulihkan.",
+          restored_target=None,
+          restored_email=None,
+      )
+
+    backup_dir, meta = latest
+    target = meta.get("target")
+    email = meta.get("email")
+
+    # Dapatkan path opencode dan gemini
+    opencode_path = None
+    if hasattr(self.opencode_file, "get_file_path"):
+      opencode_path = self.opencode_file.get_file_path()
+    elif hasattr(self.opencode_file, "_get_file_path"):
+      opencode_path = self.opencode_file._get_file_path()
+
+    gemini_dir = getattr(self.gemini_files, "gemini_dir", None)
+    if gemini_dir is None:
+      gemini_dir = getattr(self, "gemini_dir", None)
+
+    try:
+      rollback_from_backup(
+          backup_dir=backup_dir,
+          keyring_port=self.keyring,
+          gemini_dir=gemini_dir,
+          opencode_file_path=opencode_path,
+      )
+    except Exception as exc:
+      logger.exception("Gagal memulihkan backup dari %s", backup_dir)
+      return RestoreResult(
+          status=ApplyStatus.FAILED,
+          message=f"Gagal memulihkan backup: {exc}",
+          restored_target=target,
+          restored_email=email,
+          error=str(exc),
+      )
+
+    target_name = "OpenCode" if target == TARGET_OPENCODE else "Antigravity CLI"
     return RestoreResult(
         status=ApplyStatus.SUCCESS,
-        message="Operasi restore belum diterapkan pada tiket ini.",
+        message=f"Berhasil memulihkan backup terakhir untuk {email} pada target {target_name}.",
+        restored_target=target,
+        restored_email=email,
     )

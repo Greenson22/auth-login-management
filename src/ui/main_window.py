@@ -101,7 +101,13 @@ class MainWindow(QMainWindow):
     settings_action.setStatusTip("Atur folder Antigravity dan password enkripsi AES-256")
     settings_action.triggered.connect(self.open_settings_dialog)
 
+    restore_action = QAction("Pulihkan &Backup Terakhir...", self)
+    restore_action.setStatusTip("Pulihkan konfigurasi keyring atau file dari titik backup terakhir")
+    restore_action.triggered.connect(self.restore_last_backup_with_confirmation)
+
     settings_menu.addAction(settings_action)
+    settings_menu.addSeparator()
+    settings_menu.addAction(restore_action)
 
     help_menu = menu_bar.addMenu("&Bantuan")
 
@@ -514,7 +520,13 @@ class MainWindow(QMainWindow):
       if plan.error_code or (apply_result and apply_result.status.value == "FAILED"):
         err_msg = plan.error_message if plan.error_code else apply_result.user_message
         suggestion = apply_result.action_suggestion if apply_result else ""
-        full_msg = f"{err_msg}\n\n{suggestion}" if suggestion else err_msg
+        backup_loc = apply_result.backup_location if apply_result else ""
+        parts = [err_msg]
+        if suggestion:
+          parts.append(suggestion)
+        if backup_loc:
+          parts.append(f"Lokasi backup snapshot: {backup_loc}")
+        full_msg = "\n\n".join(parts)
         QMessageBox.warning(self, "Gagal Menerapkan Akun", full_msg)
         return
 
@@ -535,6 +547,87 @@ class MainWindow(QMainWindow):
     self.run_async_task(
         "Menerapkan Akun",
         f"Menerapkan akun ke target {effective_target}...",
+        task,
+        on_success,
+        on_failed,
+    )
+
+  # ─── Restore Backup Terakhir ───
+
+  def restore_last_backup_with_confirmation(self):
+    """Memulihkan backup terakhir setelah konfirmasi yang transparan mengenai kredensial."""
+    from src.integrations.antigravity.backup import get_latest_backup
+    import datetime
+
+    latest = get_latest_backup()
+    if not latest:
+      QMessageBox.information(
+          self,
+          "Tidak Ada Backup",
+          "Belum ada backup snapshot yang tersimpan untuk dipulihkan.",
+      )
+      return
+
+    backup_dir, meta = latest
+    target = meta.get("target", "opencode")
+    email = meta.get("email", "-")
+    timestamp = meta.get("timestamp", 0)
+    target_name = "OpenCode" if target == "opencode" else "Antigravity CLI"
+
+    try:
+      time_str = datetime.datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+      time_str = str(timestamp)
+
+    msg = (
+        f"Apakah Anda yakin ingin memulihkan backup snapshot berikut?\n\n"
+        f"• <b>Target:</b> {target_name}\n"
+        f"• <b>Email:</b> {email}\n"
+        f"• <b>Waktu Backup:</b> {time_str}\n"
+        f"• <b>Lokasi:</b> {backup_dir}\n\n"
+        f"<i>Peringatan: Backup ini berisi data kredensial akun dan hanya dapat diakses oleh pengguna pemilik. "
+        f"Memulihkan backup akan mengembalikan kondisi konfigurasi/keyring ke titik tersebut.</i>"
+    )
+
+    confirm = QMessageBox.question(
+        self,
+        "Konfirmasi Pulihkan Backup Terakhir",
+        msg,
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.No,
+    )
+    if confirm != QMessageBox.StandardButton.Yes:
+      return
+
+    def task():
+      return self.facade.restore_last_backup()
+
+    def on_success(res):
+      if res and res.status.value == "SUCCESS":
+        QMessageBox.information(
+            self,
+            "Pulihkan Backup Berhasil",
+            res.message or "Backup berhasil dipulihkan.",
+        )
+        self.reload_accounts()
+      else:
+        err = res.error if res else "Terjadi kesalahan"
+        QMessageBox.warning(
+            self,
+            "Gagal Memulihkan Backup",
+            f"Gagal memulihkan backup:\n\n{err}",
+        )
+
+    def on_failed(e):
+      QMessageBox.critical(
+          self,
+          "Error Pulihkan Backup",
+          f"Terjadi kesalahan saat memulihkan backup:\n\n{str(e)}",
+      )
+
+    self.run_async_task(
+        "Memulihkan Backup",
+        "Mengembalikan file dan konfigurasi dari backup terakhir...",
         task,
         on_success,
         on_failed,
