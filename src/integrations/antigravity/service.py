@@ -253,7 +253,7 @@ class AntigravityFacade:
     requires_confirmation = bool(alive_sessions and not auto_kill)
 
     # Validasi format refresh_token akun
-    raw_refresh_token = account.get("refresh_token")
+    raw_refresh_token = account.get("refresh_token") or account.get("refreshToken")
     if not raw_refresh_token or not isinstance(raw_refresh_token, str) or not raw_refresh_token.strip():
       return ApplyPlan(
           account_snapshot=account,
@@ -681,7 +681,11 @@ class AntigravityFacade:
       )
 
     # 6. Pembaruan refresh token hasil rotasi di DB (bila berbeda dari snapshot)
-    orig_rt = (plan.account_snapshot.get("refresh_token") or "").strip()
+    orig_rt = (
+        plan.account_snapshot.get("refresh_token")
+        or plan.account_snapshot.get("refreshToken")
+        or ""
+    ).strip()
     if account_id and refresh_token and refresh_token != orig_rt:
       try:
         pwd = kwargs.get("password", "")

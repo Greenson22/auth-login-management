@@ -73,7 +73,12 @@ class ProductionAccountStoragePort:
     accounts = data.get("accounts", [])
     if not accounts:
       raise ValueError(f"Rekonstruksi akun {account_id} menghasilkan accounts kosong")
-    return accounts[0]
+    acc = accounts[0]
+    if "refreshToken" in acc and "refresh_token" not in acc:
+      acc["refresh_token"] = acc["refreshToken"]
+    elif "refresh_token" in acc and "refreshToken" not in acc:
+      acc["refreshToken"] = acc["refresh_token"]
+    return acc
 
   def mark_applied(self, account_id: str, target: str, applied_at: Optional[int] = None) -> bool:
     return self.db.mark_applied(account_id, target, applied_at=applied_at)
@@ -127,18 +132,38 @@ class ProductionEnvironmentPort:
     if not self.is_linux():
       return False
     dbus = _try_import_dbus()
-    if dbus is None:
-      return False
-    try:
-      bus = dbus.SessionBus()
-      service_obj = bus.get_object(
-          "org.freedesktop.secrets", "/org/freedesktop/secrets"
-      )
-      iface = dbus.Interface(service_obj, "org.freedesktop.Secret.Service")
-      iface.OpenSession("plain", dbus.String("", variant_level=1))
-      return True
-    except Exception:
-      return False
+    if dbus is not None:
+      try:
+        bus = dbus.SessionBus()
+        service_obj = bus.get_object(
+            "org.freedesktop.secrets", "/org/freedesktop/secrets"
+        )
+        iface = dbus.Interface(service_obj, "org.freedesktop.Secret.Service")
+        iface.OpenSession("plain", dbus.String("", variant_level=1))
+        return True
+      except Exception:
+        pass
+
+    # Fallback jika secret-tool terpasang dan dapat berkomunikasi dengan Secret Service
+    if shutil.which("secret-tool") is not None:
+      try:
+        # Coba lookup non-destructive probe
+        res = subprocess.run(
+            ["secret-tool", "search", "--all", "service", "probe_test_nonexistent_12345"],
+            capture_output=True,
+            check=False,
+            timeout=2.0,
+        )
+        # Jika returncode 0 atau tidak error crash DBus, secret-tool aktif
+        if res.returncode == 0:
+          return True
+        stderr_text = res.stderr.decode("utf-8", errors="replace").lower()
+        if "cannot autolaunch d-bus" not in stderr_text and "no such interface" not in stderr_text:
+          return True
+      except Exception:
+        pass
+
+    return False
 
   def is_keyring_locked(self) -> bool:
     """True bila koleksi Login di keyring terkunci.
@@ -388,11 +413,13 @@ class ProductionOAuthPort:
     self.timeout = timeout
 
   def exchange_refresh_token(self, refresh_token: str) -> Any:
-    from .constants import ANTIGRAVITY_CLIENT_ID, TOKEN_ENDPOINT
-    from tests.fakes import OAuthErrorStub, OAuthTokenResponse
+    from .constants import ANTIGRAVITY_CLIENT_ID, ANTIGRAVITY_CLIENT_SECRET, TOKEN_ENDPOINT
+    from .errors import OAuthError
+    from tests.fakes import OAuthTokenResponse
 
     params = {
         "client_id": ANTIGRAVITY_CLIENT_ID,
+        "client_secret": ANTIGRAVITY_CLIENT_SECRET,
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
     }
@@ -415,7 +442,7 @@ class ProductionOAuthPort:
       except Exception:
         code = f"http_{http_err.code}"
         desc = str(http_err)
-      raise OAuthErrorStub(code, desc)
+      raise OAuthError(code, desc)
     except Exception as exc:
       raise RuntimeError(f"Gagal menghubungi server token Google: {exc}")
 
