@@ -78,6 +78,9 @@ class MainWindow(QMainWindow):
     self.account_table.apply_requested.connect(self.apply_account_to_target)
     self.config_bar.target_changed.connect(self._on_target_changed)
     self.account_table.copy_requested.connect(self.copy_account_json)
+    self.account_table.refresh_quota_requested.connect(self.refresh_account_quota)
+    self.account_table.bulk_refresh_quota_requested.connect(self.bulk_refresh_account_quotas)
+    self.account_table.refresh_all_quotas_requested.connect(self.refresh_all_accounts_quota)
     self.account_table.update_file_requested.connect(self.update_antigravity_file)
     self.account_table.update_db_requested.connect(self.update_db_from_antigravity)
     self.account_table.change_category_requested.connect(self.change_account_category)
@@ -922,4 +925,203 @@ class MainWindow(QMainWindow):
         task,
         on_success,
         on_failed,
+    )
+
+  # ─── Refresh Quota (Gemini & Claude) ───
+
+  def _extract_account_dict(self, account_id: str, password: str = "") -> dict:
+    """Helper untuk merekonstruksi dan mengembalikan dictionary akun pertama dari database."""
+    raw_json = self.db.reconstruct_json_by_id(account_id, password=password)
+    if not raw_json:
+      raise ValueError("Data akun tidak ditemukan di database.")
+    data = json.loads(raw_json)
+    if isinstance(data, list) and len(data) > 0:
+      acc = data[0]
+    elif isinstance(data, dict):
+      accs = data.get("accounts", [])
+      acc = accs[0] if (isinstance(accs, list) and len(accs) > 0) else data
+    else:
+      raise ValueError("Format JSON akun tidak valid.")
+
+    if "refreshToken" not in acc and "refresh_token" in acc:
+      acc["refreshToken"] = acc["refresh_token"]
+    if "projectId" not in acc and "project_id" in acc:
+      acc["projectId"] = acc["project_id"]
+    return acc
+
+  def refresh_account_quota(self, account_id: str, email: str):
+    """Mengambil kuota terbaru dari backend Google Cloud Code dan menyimpannya ke database & tabel."""
+    from src.integrations.antigravity.quota_service import fetch_account_quota
+
+    enc_pw = self._get_encryption_password()
+
+    def task():
+      acc_data = self._extract_account_dict(account_id, password=enc_pw)
+      rt = acc_data.get("refreshToken")
+      pid = acc_data.get("projectId") or "aicode-consumers"
+      if not rt:
+        raise ValueError("Akun tidak memiliki refreshToken yang valid.")
+
+      quotas = fetch_account_quota(rt, project_id=pid)
+      if not quotas:
+        raise ValueError("Server tidak mengembalikan informasi kuota untuk akun ini.")
+
+      self.db.update_account_quotas(account_id, quotas)
+      return quotas
+
+    def on_success(quotas):
+      self.account_table.update_row_quota_cells(account_id, quotas)
+      # Reload akun agar seluruh cache & sorting internal ter-update
+      self.reload_accounts()
+      QMessageBox.information(
+          self,
+          "Kuota Diperbarui",
+          f"Kuota model Gemini & Claude untuk akun <b>{email}</b> berhasil diperbarui!",
+      )
+
+    def on_failed(e):
+      QMessageBox.critical(
+          self,
+          "Gagal Memperbarui Kuota",
+          f"Terjadi kesalahan saat memperbarui kuota untuk <b>{email}</b>:\n\n{str(e)}",
+      )
+
+    self.run_async_task(
+        "Memperbarui Kuota",
+        f"Mengambil sisa kuota Gemini & Claude untuk {email}...\nMohon tunggu beberapa saat.",
+        task,
+        on_success,
+        on_failed,
+    )
+
+  def bulk_refresh_account_quotas(self, account_list: list):
+    """Memperbarui kuota untuk sejumlah akun terpilih secara berurutan di background."""
+    from src.integrations.antigravity.quota_service import fetch_account_quota
+
+    enc_pw = self._get_encryption_password()
+
+    def task():
+      results = []
+      for acc_id, email in account_list:
+        try:
+          acc_data = self._extract_account_dict(acc_id, password=enc_pw)
+          rt = acc_data.get("refreshToken")
+          if not rt:
+            results.append((acc_id, email, False, "Refresh token tidak tersedia"))
+            continue
+          pid = acc_data.get("projectId") or "aicode-consumers"
+          quotas = fetch_account_quota(rt, project_id=pid)
+          if not quotas:
+            results.append((acc_id, email, False, "Data kuota kosong"))
+            continue
+          self.db.update_account_quotas(acc_id, quotas)
+          results.append((acc_id, email, True, quotas))
+        except Exception as ex:
+          results.append((acc_id, email, False, str(ex)))
+      return results
+
+    def on_success(results):
+      success_count = 0
+      failed_details = []
+      for acc_id, email, ok, payload in results:
+        if ok:
+          success_count += 1
+          self.account_table.update_row_quota_cells(acc_id, payload)
+        else:
+          failed_details.append(f"• {email}: {payload}")
+
+      self.reload_accounts()
+      msg = f"Berhasil memperbarui {success_count} dari {len(account_list)} akun."
+      if failed_details:
+        msg += "\n\nCatatan / Kendala:\n" + "\n".join(failed_details[:5])
+        if len(failed_details) > 5:
+          msg += f"\n...dan {len(failed_details) - 5} lainnya."
+        QMessageBox.warning(self, "Pembaruan Kuota Selesai", msg)
+      else:
+        QMessageBox.information(self, "Pembaruan Kuota Selesai", msg)
+
+    self.run_async_task(
+        "Memperbarui Kuota Masal",
+        f"Memperbarui kuota {len(account_list)} akun terpilih...\nMohon tunggu beberapa saat.",
+        task,
+        on_success,
+    )
+
+  def refresh_all_accounts_quota(self):
+    """Memperbarui kuota untuk SEMUA akun yang ada di database secara otomatis."""
+    if not self.db:
+      return
+
+    rows = self.db.fetch_accounts_summary()
+    if not rows:
+      QMessageBox.information(
+          self,
+          "Daftar Akun Kosong",
+          "Belum ada akun yang tersimpan di database.",
+      )
+      return
+
+    # Siapkan daftar (account_id, email)
+    all_accounts = [(r[0], r[1]) for r in rows if r and len(r) > 1]
+
+    confirm = QMessageBox.question(
+        self,
+        "Konfirmasi Perbarui Semua Kuota",
+        f"Apakah Anda ingin memperbarui kuota Gemini & Claude untuk seluruh <b>{len(all_accounts)} akun</b> di database?",
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.Yes,
+    )
+    if confirm != QMessageBox.StandardButton.Yes:
+      return
+
+    from src.integrations.antigravity.quota_service import fetch_account_quota
+
+    enc_pw = self._get_encryption_password()
+
+    def task():
+      results = []
+      total = len(all_accounts)
+      for idx, (acc_id, email) in enumerate(all_accounts):
+        try:
+          acc_data = self._extract_account_dict(acc_id, password=enc_pw)
+          rt = acc_data.get("refreshToken")
+          if not rt:
+            results.append((acc_id, email, False, "Refresh token tidak tersedia"))
+            continue
+          pid = acc_data.get("projectId") or "aicode-consumers"
+          quotas = fetch_account_quota(rt, project_id=pid)
+          if not quotas:
+            results.append((acc_id, email, False, "Data kuota kosong"))
+            continue
+          self.db.update_account_quotas(acc_id, quotas)
+          results.append((acc_id, email, True, quotas))
+        except Exception as ex:
+          results.append((acc_id, email, False, str(ex)))
+      return results
+
+    def on_success(results):
+      success_count = 0
+      failed_details = []
+      for acc_id, email, ok, payload in results:
+        if ok:
+          success_count += 1
+          self.account_table.update_row_quota_cells(acc_id, payload)
+        else:
+          failed_details.append(f"• {email}: {payload}")
+
+      self.reload_accounts()
+      msg = f"Selesai! Berhasil memperbarui {success_count} dari {len(all_accounts)} akun."
+      if failed_details:
+        msg += "\n\nCatatan / Akun dengan kendala:\n" + "\n".join(failed_details[:6])
+        if len(failed_details) > 6:
+          msg += f"\n...dan {len(failed_details) - 6} lainnya."
+        QMessageBox.warning(self, "Pembaruan Semua Kuota Selesai", msg)
+      else:
+        QMessageBox.information(self, "Pembaruan Semua Kuota Sukses", msg)
+
+    self.run_async_task(
+        "Memperbarui Semua Kuota",
+        f"Sedang memperbarui kuota {len(all_accounts)} akun di database...\nMohon tunggu beberapa saat.",
+        task,
+        on_success,
     )

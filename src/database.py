@@ -1,7 +1,7 @@
 import json
 import sqlite3
 import time
-from typing import Optional
+from typing import Any, Dict, List, Optional
 from src.crypto import (
     create_encryption_canary,
     decrypt_aes256,
@@ -416,6 +416,67 @@ class AccountDatabase:
         ) from e
 
     return count
+
+  def update_account_quotas(
+      self,
+      account_id: str,
+      quotas: Dict[str, Dict[str, Any]],
+      updated_at_epoch: Optional[int] = None,
+  ) -> bool:
+    """Memperbarui data kuota akun spesifik di tabel account_quotas dan cached_quota_updated_at di accounts."""
+    if not account_id or not quotas:
+      return False
+
+    if updated_at_epoch is None:
+      import time
+      updated_at_epoch = int(time.time() * 1000)
+
+    sql_q = """
+        INSERT INTO account_quotas (
+            account_id, model_name, remaining_fraction, reset_time,
+            remaining_fraction_reset_time, model_count
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(account_id, model_name) DO UPDATE SET
+            remaining_fraction=excluded.remaining_fraction,
+            reset_time=excluded.reset_time,
+            remaining_fraction_reset_time=excluded.remaining_fraction_reset_time,
+            model_count=excluded.model_count
+    """
+    sql_acc = """
+        UPDATE accounts
+        SET cached_quota_updated_at = ?
+        WHERE id = ?
+    """
+
+    quota_args = []
+    for model_name, q in quotas.items():
+      rem_frac = q.get("remainingFraction")
+      r_time = q.get("resetTime")
+      rf_reset = q.get("remainingFractionResetTime")
+      m_count = q.get("modelCount")
+      quota_args.append([
+          account_id,
+          model_name,
+          rem_frac,
+          r_time,
+          rf_reset,
+          m_count,
+      ])
+
+    if self.use_turso and self.turso_client:
+      stmts = [(sql_acc, [updated_at_epoch, account_id])]
+      for args_q in quota_args:
+        stmts.append((sql_q, args_q))
+      self.turso_client.execute_pipeline(stmts)
+      return True
+    else:
+      with self.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql_acc, (updated_at_epoch, account_id))
+        for args_q in quota_args:
+          cursor.execute(sql_q, args_q)
+        conn.commit()
+      return True
 
   def delete_account(self, account_id: str) -> bool:
     """Menghapus akun berdasarkan ID dari database."""

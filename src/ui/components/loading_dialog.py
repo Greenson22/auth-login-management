@@ -74,3 +74,16 @@ class LoadingDialog(QDialog):
 
   def set_message(self, message: str):
     self.lbl_message.setText(message)
+
+  def set_progress(self, current: int, total: int, message: str = ""):
+    """Mengatur progress determinate (misal 3/10) beserta teks status."""
+    if total > 0:
+      self.progress_bar.setRange(0, total)
+      self.progress_bar.setValue(current)
+      self.progress_bar.setTextVisible(True)
+      self.progress_bar.setFormat(f"{current}/{total} (%p%)")
+    else:
+      self.progress_bar.setRange(0, 0)
+      self.progress_bar.setTextVisible(False)
+    if message:
+      self.lbl_message.setText(message)

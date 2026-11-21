@@ -21,6 +21,9 @@ class AccountTableWidget(QWidget):
 
   # Sinyal untuk aksi context menu & double-click
   apply_requested = pyqtSignal(str, str)  # account_id, target ("opencode" atau "antigravity_cli")
+  refresh_quota_requested = pyqtSignal(str, str)  # account_id, email
+  bulk_refresh_quota_requested = pyqtSignal(list)  # list of (account_id, email)
+  refresh_all_quotas_requested = pyqtSignal()  # minta refresh seluruh akun
   copy_requested = pyqtSignal(str)
   update_file_requested = pyqtSignal(str, str)
   update_db_requested = pyqtSignal(str, str)
@@ -64,6 +67,14 @@ class AccountTableWidget(QWidget):
     self.btn_manage_categories.setStyleSheet("padding: 4px 8px; font-weight: bold;")
     self.btn_manage_categories.clicked.connect(self.manage_categories_requested.emit)
 
+    # Tombol Perbarui Semua Kuota
+    self.btn_refresh_all_quotas = QPushButton("⚡ Perbarui Semua Kuota")
+    self.btn_refresh_all_quotas.setToolTip("Perbarui kuota Gemini & Claude untuk SEMUA akun di database secara cepat")
+    self.btn_refresh_all_quotas.setStyleSheet(
+        "padding: 4px 10px; font-weight: bold; background-color: #1a73e8; color: white; border-radius: 4px;"
+    )
+    self.btn_refresh_all_quotas.clicked.connect(self.refresh_all_quotas_requested.emit)
+
     # Urutkan Berdasarkan
     label_sort = QLabel("<b>Urutkan:</b>")
     self.cmb_sort_mode = QComboBox()
@@ -85,6 +96,7 @@ class AccountTableWidget(QWidget):
     control_layout.addWidget(label_filter)
     control_layout.addWidget(self.cmb_category_filter)
     control_layout.addWidget(self.btn_manage_categories)
+    control_layout.addWidget(self.btn_refresh_all_quotas)
     control_layout.addWidget(label_sort)
     control_layout.addWidget(self.cmb_sort_mode)
 
@@ -474,6 +486,55 @@ class AccountTableWidget(QWidget):
         item.setFont(font)
       self.table.setItem(row_idx, c, item)
 
+  def update_row_quota_cells(self, account_id: str, quota_dict: dict):
+    """Memperbarui sel kuota (Flash, Pro, Claude) langsung pada baris tabel akun yang bersangkutan."""
+    for r in range(self.table.rowCount()):
+      item_0 = self.table.item(r, 0)
+      if item_0 and item_0.data(Qt.ItemDataRole.UserRole) == account_id:
+        flash_info = quota_dict.get("gemini-flash", {})
+        pro_info = quota_dict.get("gemini-pro", {})
+        claude_info = quota_dict.get("claude", {})
+
+        p_flash = parse_quota_info(flash_info.get("remainingFraction"), flash_info.get("resetTime"))
+        p_pro = parse_quota_info(pro_info.get("remainingFraction"), pro_info.get("resetTime"))
+        p_claude = parse_quota_info(claude_info.get("remainingFraction"), claude_info.get("resetTime"))
+        row_has_reset = p_flash[1] or p_pro[1] or p_claude[1]
+
+        # Update item flash (col 4)
+        item_flash = self.table.item(r, 4)
+        if item_flash:
+          item_flash.setText(p_flash[0])
+          item_flash.setForeground(QBrush(QColor(p_flash[2])))
+
+        # Update item pro (col 5)
+        item_pro = self.table.item(r, 5)
+        if item_pro:
+          item_pro.setText(p_pro[0])
+          item_pro.setForeground(QBrush(QColor(p_pro[2])))
+
+        # Update item claude (col 6)
+        item_claude = self.table.item(r, 6)
+        if item_claude:
+          item_claude.setText(p_claude[0])
+          item_claude.setForeground(QBrush(QColor(p_claude[2])))
+
+        # Update style baris jika ada reset time
+        for c in range(self.table.columnCount()):
+          it = self.table.item(r, c)
+          if it:
+            if row_has_reset:
+              it.setBackground(QBrush(QColor("#ffcdd2")))
+              font = it.font()
+              font.setBold(True)
+              it.setFont(font)
+            else:
+              it.setBackground(QBrush(QColor("#ffffff")))
+              font = it.font()
+              if c not in (2, 3):  # jangan ubah bold pada aktif_di atau enkripsi
+                font.setBold(False)
+              it.setFont(font)
+        break
+
   def _show_context_menu(self, pos):
     item = self.table.itemAt(pos)
     if not item:
@@ -506,12 +567,16 @@ class AccountTableWidget(QWidget):
     # Jika user memilih lebih dari 1 akun dan klik pada salah satu akun yang terseleksi
     if len(selected_accounts) > 1 and any(acc[0] == account_id for acc in selected_accounts):
       menu = QMenu(self)
+      action_bulk_refresh = menu.addAction(f"  ⚡ Perbarui Kuota {len(selected_accounts)} Akun Terpilih")
+      menu.addSeparator()
       action_bulk_cat = menu.addAction(f"  🏷️ Pindahkan {len(selected_accounts)} Akun Terpilih ke Kategori...")
       menu.addSeparator()
       action_manage = menu.addAction("  📁 Manajemen Kategori...")
 
       chosen_action = menu.exec(self.table.viewport().mapToGlobal(pos))
-      if chosen_action == action_bulk_cat:
+      if chosen_action == action_bulk_refresh:
+        self.bulk_refresh_quota_requested.emit(selected_accounts)
+      elif chosen_action == action_bulk_cat:
         self.bulk_change_category_requested.emit([acc[0] for acc in selected_accounts])
       elif chosen_action == action_manage:
         self.manage_categories_requested.emit()
@@ -546,6 +611,9 @@ class AccountTableWidget(QWidget):
       action_apply_cli.setToolTip(f"Tidak tersedia: {cli_unavailable_reason}")
 
     menu.addSeparator()
+    action_refresh_quota = menu.addAction("  ⚡ Perbarui Kuota Akun Ini")
+    action_refresh_all = menu.addAction("  ⚡ Perbarui Semua Kuota di Database")
+    menu.addSeparator()
     action_copy = menu.addAction("  📋 Copy JSON")
     action_update_file = menu.addAction("  💾 Update ke antigravity-accounts.json")
     action_update_db = menu.addAction(
@@ -562,6 +630,10 @@ class AccountTableWidget(QWidget):
       self.apply_requested.emit(account_id, "opencode")
     elif chosen_action == action_apply_cli:
       self.apply_requested.emit(account_id, "antigravity_cli")
+    elif chosen_action == action_refresh_quota:
+      self.refresh_quota_requested.emit(account_id, email)
+    elif chosen_action == action_refresh_all:
+      self.refresh_all_quotas_requested.emit()
     elif chosen_action == action_copy:
       self.copy_requested.emit(account_id)
     elif chosen_action == action_update_file:

@@ -157,72 +157,68 @@ class AboutDialog(QDialog):
     features = [
         {
             "icon": "⚡",
-            "title": "Manajemen Akun JSON Terpusat",
+            "title": "Pembaruan Kuota Real-Time (Gemini & Claude)",
             "subtitle": (
-                "Simpan, organisir, dan kelola akun multi-kredensial format"
-                " JSON Antigravity / OpenCode dengan validasi format instan dan"
-                " tampilan tabel terstruktur."
+                "Perbarui sisa kuota Gemini (termasuk Gemini 3.8 Flash & Pro) dan Claude"
+                " secara langsung dari Google Cloud backend dengan satu klik per akun maupun"
+                " serentak untuk seluruh akun di database."
+            ),
+        },
+        {
+            "icon": "🚀",
+            "title": "Dual-Target Apply (OpenCode & Antigravity CLI)",
+            "subtitle": (
+                "Suntikkan kredensial akun secara instan baik ke OpenCode (~/.config/opencode)"
+                " maupun ke Antigravity CLI (sistem keyring Secret Service / secret-tool & ~/.gemini)"
+                " lengkap dengan backup otomatis dan rollback aman."
+            ),
+        },
+        {
+            "icon": "🏷️",
+            "title": "Manajemen Kategori Akun",
+            "subtitle": (
+                "Kelompokkan akun ke dalam berbagai kategori kustom, filter tampilan tabel per"
+                " kategori atau semua dengan pemisah visual, dan pindahkan banyak akun sekaligus."
             ),
         },
         {
             "icon": "☁️",
             "title": "Sinkronisasi Turso Database & SQLite Lokal",
             "subtitle": (
-                "Dukungan fleksibel penyimpanan offline lokal"
-                " (accounts_manager.db) serta sinkronisasi cloud database Turso"
-                " (libSQL) dengan pengujian koneksi langsung."
+                "Dukungan fleksibel penyimpanan offline lokal (accounts_manager.db)"
+                " serta sinkronisasi cloud database Turso (libSQL) dengan pengujian koneksi langsung."
             ),
         },
         {
             "icon": "🔒",
-            "title": "Enkripsi Kredensial AES-256",
+            "title": "Enkripsi Kredensial AES-256 & Canary Word",
             "subtitle": (
-                "Keamanan tingkat tinggi dengan enkripsi standar militer"
-                " AES-256-CBC dan derivasi PBKDF2 untuk melindungi token dan"
-                " data sensitif di database."
+                "Keamanan tinggi dengan enkripsi standar militer AES-256-CBC, PBKDF2,"
+                " dan verifikasi canary word otomatis untuk mendeteksi keabsahan password master."
             ),
         },
         {
-            "icon": "🔄",
-            "title": "Hot-Swap File Antigravity",
+            "icon": "🛡️",
+            "title": "Audit Riwayat & Backup Titik Pulih",
             "subtitle": (
-                "Terapkan dan suntikkan konfigurasi akun terpilih langsung ke"
-                " berkas aktif target Antigravity secara real-time hanya dengan"
-                " satu klik tombol."
-            ),
-        },
-        {
-            "icon": "📥",
-            "title": "Sinkronisasi Balik (Reverse Sync)",
-            "subtitle": (
-                "Perbarui catatan database langsung dari berkas aktif"
-                " Antigravity saat ini, memastikan konsistensi konfigurasi yang"
-                " sedang digunakan."
+                "Pencatatan riwayat apply target terakhir, rotasi backup otomatis,"
+                " serta pemulihan konfigurasi keyring/file dari titik backup terakhir lewat menu Pengaturan."
             ),
         },
         {
             "icon": "📋",
             "title": "Penyalinan JSON Satu Klik",
             "subtitle": (
-                "Salin seluruh objek JSON akun secara rapi dan instan ke system"
-                " clipboard untuk kebutuhan debug, otomasi, maupun backup."
+                "Salin seluruh objek JSON akun secara rapi dan instan ke system clipboard"
+                " untuk kebutuhan otomasi, debug, maupun backup manual."
             ),
         },
         {
             "icon": "🔍",
-            "title": "Pencarian Cepat & Pengurutan Adaptif",
+            "title": "Pengurutan Cerdas & Pelacakan Status Aktif",
             "subtitle": (
-                "Urutkan daftar akun berdasarkan ID, nama akun, waktu update"
-                " terbaru/terlama, serta filter pencarian cepat tanpa lag."
-            ),
-        },
-        {
-            "icon": "⚙️",
-            "title": "Konfigurasi Direktori Fleksibel",
-            "subtitle": (
-                "Atur direktori path folder Antigravity bebas di mana saja,"
-                " memudahkan integrasi di sistem Linux, Windows, maupun"
-                " multi-environment."
+                "Urutkan daftar akun berdasarkan Reset Time tercepat, kuota model terbanyak/tersedikit,"
+                " atau nama email. Kolom 'Aktif di' menunjukkan target mana yang sedang menggunakan akun tersebut."
             ),
         },
     ]
@@ -442,7 +438,7 @@ class AboutDialog(QDialog):
     container_layout.addLayout(btn_links_layout)
 
     # 5. Versi Aplikasi
-    lbl_version = QLabel("Versi 1.0.0 (Build 2026)")
+    lbl_version = QLabel("Versi 2.1.0 (Build November 2026)")
     lbl_version.setStyleSheet(
         "font-size: 11px; color: #888888; margin-top: 10px;"
     )
