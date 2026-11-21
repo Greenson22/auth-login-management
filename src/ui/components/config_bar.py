@@ -1,11 +1,17 @@
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QWidget
+
+from .target_badge import TargetBadge
 
 
 class ConfigBarWidget(QWidget):
-  """Komponen bar atas untuk menampilkan folder aktif serta indikator status Turso/Local DB dan Enkripsi."""
+  """Komponen bar atas untuk menampilkan folder aktif serta indikator status Turso/Local DB, Enkripsi, dan Target."""
 
-  def __init__(self, parent=None):
+  target_changed = pyqtSignal(str)
+
+  def __init__(self, parent=None, *, settings=None):
     super().__init__(parent)
+    self._settings = settings
     self.init_ui()
 
   def init_ui(self):
@@ -31,18 +37,32 @@ class ConfigBarWidget(QWidget):
     )
     self.lbl_crypto_status.setToolTip("Enkripsi akun AES-256 tidak aktif")
 
-    label_folder = QLabel("<b>Folder Aktif:</b>")
+    # Chip pemilihan Target global (OpenCode / Antigravity CLI)
+    self.target_badge = TargetBadge(settings=self._settings)
+    self.target_badge.target_changed.connect(self.target_changed.emit)
+
+    self.lbl_folder = QLabel("<b>Folder Aktif:</b>")
     self.txt_folder_path = QLineEdit()
     self.txt_folder_path.setReadOnly(True)
     self.txt_folder_path.setPlaceholderText("Belum ditentukan (Atur di Menu Pengaturan)...")
+    self.txt_folder_path.setMinimumWidth(120)
     self.txt_folder_path.setStyleSheet(
         "QLineEdit { background-color: rgba(128, 128, 128, 0.08); padding: 4px 8px; }"
     )
 
     layout.addWidget(self.lbl_db_status)
     layout.addWidget(self.lbl_crypto_status)
-    layout.addWidget(label_folder)
-    layout.addWidget(self.txt_folder_path)
+    layout.addWidget(self.target_badge)
+    layout.addWidget(self.lbl_folder)
+    layout.addWidget(self.txt_folder_path, 1)
+
+  def get_active_target(self) -> str:
+    """Target global yang sedang dipilih."""
+    return self.target_badge.get_target()
+
+  def set_active_target(self, target: str) -> str:
+    """Pilih target, simpan ke QSettings, dan perbarui chip."""
+    return self.target_badge.set_target(target)
 
   def get_folder_path(self) -> str:
     return self.txt_folder_path.text().strip()

@@ -1,7 +1,7 @@
 import json
 import os
 
-from PyQt6.QtCore import QSettings, Qt
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QIcon, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from src.database import AccountDatabase
+from src.targets import create_settings
 from src.turso_client import TursoClient
 from src.ui.components import (
     AboutDialog,
@@ -31,7 +32,7 @@ class MainWindow(QMainWindow):
 
   def __init__(self):
     super().__init__()
-    self.settings = QSettings("OpenCodeApp", "AccountManager")
+    self.settings = create_settings()
     self.db = None
     self._current_worker = None  # Mencegah garbage collection pada worker aktif
     self.init_ui()
@@ -53,7 +54,7 @@ class MainWindow(QMainWindow):
     self.setCentralWidget(main_widget)
     main_layout = QVBoxLayout(main_widget)
 
-    self.config_bar = ConfigBarWidget()
+    self.config_bar = ConfigBarWidget(settings=self.settings)
     self.json_input = JsonInputWidget()
     self.account_table = AccountTableWidget()
 

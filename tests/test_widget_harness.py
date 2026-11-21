@@ -1,9 +1,19 @@
 import os
 
+from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import QApplication
 
 from src.ui.components.account_table import AccountTableWidget
 from src.ui.components.config_bar import ConfigBarWidget
+
+
+def _isolated_settings(tmp_path) -> QSettings:
+  settings = QSettings(
+      str(tmp_path / "harness-settings.ini"), QSettings.Format.IniFormat
+  )
+  settings.clear()
+  settings.sync()
+  return settings
 
 
 def test_widgets_run_on_offscreen_platform(qtbot):
@@ -11,8 +21,8 @@ def test_widgets_run_on_offscreen_platform(qtbot):
   assert QApplication.platformName() == "offscreen"
 
 
-def test_config_bar_can_be_instantiated_offscreen(qtbot):
-  widget = ConfigBarWidget()
+def test_config_bar_can_be_instantiated_offscreen(qtbot, tmp_path):
+  widget = ConfigBarWidget(settings=_isolated_settings(tmp_path))
   qtbot.addWidget(widget)
   widget.show()
 
