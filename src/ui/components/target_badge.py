@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import QMenu, QSizePolicy, QToolButton
 
 from src.targets import (
     ALL_TARGETS,
+    TARGET_ANTIGRAVITY_CLI,
     TARGET_OPENCODE,
     create_settings,
     load_active_target,
@@ -27,169 +28,221 @@ _BADGE_STYLESHEET = (
     "QToolButton::menu-indicator { image: none; }"
 )
 
+# Pemetaan kode alasan ke teks yang ramah pengguna
+_UNAVAIL_REASON_TEXT = {
+    "unsupported_os": "Hanya didukung di OS Linux",
+    "no_dbus": "D-Bus / Secret Service tidak tersedia",
+    "keyring_locked": "Keyring terkunci — buka keyring lalu coba lagi",
+    "root": "Aplikasi dijalankan sebagai root (tidak aman)",
+    "dbus_error": "Terjadi kesalahan saat menghubungi D-Bus",
+}
+
+
+def _get_cli_unavailable_reason() -> str | None:
+    """Periksa availability CLI dan kembalikan kode alasan atau None jika tersedia.
+
+    Dipanggil setiap kali menu target dibuka agar keyring yang baru dibuka
+    langsung terdeteksi tanpa perlu restart.
+    """
+    try:
+        from src.integrations.antigravity.factory import check_cli_availability
+        available, reason = check_cli_availability()
+        return None if available else reason
+    except Exception:
+        return "dbus_error"
+
 
 class TargetBadge(QToolButton):
-  """Chip Target dengan menu OpenCode / Antigravity CLI.
+    """Chip Target dengan menu OpenCode / Antigravity CLI.
 
-  Pilihan disimpan ke QSettings. Widget ini tidak pernah menyentuh file
-  OpenCode, keyring, maupun ``~/.gemini``.
-  """
+    Pilihan disimpan ke QSettings. Widget ini tidak pernah menyentuh file
+    OpenCode, keyring, maupun ``~/.gemini``.
 
-  target_changed = pyqtSignal(str)
+    Availability Antigravity CLI diperiksa ulang setiap kali menu dibuka
+    sehingga keyring yang baru dibuka pengguna langsung terdeteksi tanpa
+    restart.
+    """
 
-  def __init__(self, settings=None, parent=None):
-    super().__init__(parent)
-    self._settings = settings if settings is not None else create_settings()
-    self._target = load_active_target(self._settings)
-    self._actions: dict[str, QAction] = {}
-    self._target_status = None
+    target_changed = pyqtSignal(str)
 
-    self.setObjectName("targetBadge")
-    self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-    self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-    # Ukuran alami = sizeHint (tidak melar), tetapi boleh menyusut saat sempit.
-    self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
-    self.setMinimumWidth(_MIN_CHIP_WIDTH)
-    self.setStyleSheet(_BADGE_STYLESHEET)
+    def __init__(self, settings=None, parent=None):
+        super().__init__(parent)
+        self._settings = settings if settings is not None else create_settings()
+        self._target = load_active_target(self._settings)
+        self._actions: dict[str, QAction] = {}
+        self._target_status = None
+        # Cache terakhir dari availability check (None = belum dicek)
+        self._cli_unavail_reason: str | None | bool = False  # False = belum dicek
 
-    self._build_menu()
-    self._sync_checked_action()
-    self._update_display()
+        self.setObjectName("targetBadge")
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        # Ukuran alami = sizeHint (tidak melar), tetapi boleh menyusut saat sempit.
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.setMinimumWidth(_MIN_CHIP_WIDTH)
+        self.setStyleSheet(_BADGE_STYLESHEET)
 
-  def resizeEvent(self, event):
-    super().resizeEvent(event)
-    self._update_display()
+        self._build_menu()
+        self._sync_checked_action()
+        self._update_display()
 
-  def sizeHint(self) -> QSize:
-    """Lebar alami selalu berdasarkan teks penuh, bukan teks yang ter-elide."""
-    base = super().sizeHint()
-    full_width = (
-        self.fontMetrics().horizontalAdvance(self._full_label())
-        + _CHIP_HORIZONTAL_CHROME
-    )
-    return QSize(max(_MIN_CHIP_WIDTH, full_width), base.height())
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_display()
 
-  # ─── API publik ───
+    def sizeHint(self) -> QSize:
+        """Lebar alami selalu berdasarkan teks penuh, bukan teks yang ter-elide."""
+        base = super().sizeHint()
+        full_width = (
+            self.fontMetrics().horizontalAdvance(self._full_label())
+            + _CHIP_HORIZONTAL_CHROME
+        )
+        return QSize(max(_MIN_CHIP_WIDTH, full_width), base.height())
 
-  def get_target(self) -> str:
-    return self._target
+    # ─── API publik ───
 
-  def set_target(self, target: object) -> str:
-    """Pilih target, simpan, perbarui chip, dan pancarkan sinyal bila berubah."""
-    canonical = normalize_target(target)
-    changed = canonical != self._target
-    self._target = canonical
-    self._sync_checked_action()
-    self._update_display()
-    self.updateGeometry()
-    if changed:
-      save_active_target(self._settings, canonical)
-      self.target_changed.emit(canonical)
-    return canonical
+    def get_target(self) -> str:
+        return self._target
 
-  def set_status(self, status) -> None:
-    """Menyetel status target aktif dan memperbarui badge serta tooltip."""
-    self._target_status = status
-    self._update_display()
-    self.updateGeometry()
+    def set_target(self, target: object) -> str:
+        """Pilih target, simpan, perbarui chip, dan pancarkan sinyal bila berubah."""
+        canonical = normalize_target(target)
+        changed = canonical != self._target
+        self._target = canonical
+        self._sync_checked_action()
+        self._update_display()
+        self.updateGeometry()
+        if changed:
+            save_active_target(self._settings, canonical)
+            self.target_changed.emit(canonical)
+        return canonical
 
-  # ─── Internal ───
+    def set_status(self, status) -> None:
+        """Menyetel status target aktif dan memperbarui badge serta tooltip."""
+        self._target_status = status
+        self._update_display()
+        self.updateGeometry()
 
-  def _build_menu(self) -> None:
-    menu = QMenu(self)
-    group = QActionGroup(menu)
-    group.setExclusive(True)
+    # ─── Internal ───
 
-    for target in ALL_TARGETS:
-      action = menu.addAction(target_label(target))
-      action.setCheckable(True)
-      action.setActionGroup(group)
-      action.triggered.connect(
-          lambda _checked=False, value=target: self.set_target(value)
-      )
-      self._actions[target] = action
+    def _build_menu(self) -> None:
+        menu = QMenu(self)
+        # Recheck CLI availability setiap kali menu akan ditampilkan
+        menu.aboutToShow.connect(self._on_menu_about_to_show)
 
-    self.setMenu(menu)
+        group = QActionGroup(menu)
+        group.setExclusive(True)
 
-  def _sync_checked_action(self) -> None:
-    for target, action in self._actions.items():
-      action.setChecked(target == self._target)
+        for target in ALL_TARGETS:
+            action = menu.addAction(target_label(target))
+            action.setCheckable(True)
+            action.setActionGroup(group)
+            action.triggered.connect(
+                lambda _checked=False, value=target: self.set_target(value)
+            )
+            self._actions[target] = action
 
-  def _full_label(self) -> str:
-    prefix = f"🎯 Target: {target_label(self._target)}"
-    if not self._target_status:
-      return prefix
+        self.setMenu(menu)
 
-    cond = getattr(self._target_status, "condition", None)
-    email = getattr(self._target_status, "email", None)
+    def _on_menu_about_to_show(self) -> None:
+        """Recheck CLI availability setiap kali menu dibuka."""
+        reason = _get_cli_unavailable_reason()
+        self._cli_unavail_reason = reason
+        self._apply_cli_availability(reason)
 
-    # Nilai kondisi bisa berupa string atau enum
-    cond_val = cond.value if hasattr(cond, "value") else str(cond or "")
+    def _apply_cli_availability(self, reason: str | None) -> None:
+        """Aktifkan atau nonaktifkan item CLI sesuai availability."""
+        action = self._actions.get(TARGET_ANTIGRAVITY_CLI)
+        if action is None:
+            return
+        available = reason is None
+        action.setEnabled(available)
+        if not available:
+            reason_text = _UNAVAIL_REASON_TEXT.get(reason or "", reason or "Tidak tersedia")
+            action.setToolTip(f"Tidak tersedia: {reason_text}")
+        else:
+            action.setToolTip("")
 
-    if cond_val == "active":
-      return f"{prefix} • 🟢 {email}" if email else f"{prefix} • 🟢 Aktif"
-    elif cond_val == "unrecorded":
-      return f"{prefix} • 🟡 Tidak tercatat"
-    elif cond_val == "invalid_file":
-      return f"{prefix} • 🔴 File tidak valid"
-    elif cond_val == "none":
-      return f"{prefix} • ⚪ Belum login"
-    elif cond_val == "drift_gemini":
-      return f"{prefix} • 🟡 Drift (~/.gemini)"
-    elif cond_val == "unavailable":
-      return f"{prefix} • ⛔ Tidak tersedia"
-    elif cond_val == "locked":
-      return f"{prefix} • 🔒 Keyring terkunci"
-    elif cond_val == "error":
-      return f"{prefix} • 🔴 Error"
-    return prefix
+    def _sync_checked_action(self) -> None:
+        for target, action in self._actions.items():
+            action.setChecked(target == self._target)
 
-  def _full_tooltip(self) -> str:
-    lines = [self._full_label()]
-    if not self._target_status:
-      return lines[0]
+    def _full_label(self) -> str:
+        prefix = f"🎯 Target: {target_label(self._target)}"
+        if not self._target_status:
+            return prefix
 
-    email = getattr(self._target_status, "email", None)
-    if email:
-      lines.append(f"Email Aktif: {email}")
+        cond = getattr(self._target_status, "condition", None)
+        email = getattr(self._target_status, "email", None)
 
-    cond = getattr(self._target_status, "condition", None)
-    cond_val = cond.value if hasattr(cond, "value") else str(cond or "")
-    lines.append(f"Kondisi: {cond_val}")
+        # Nilai kondisi bisa berupa string atau enum
+        cond_val = cond.value if hasattr(cond, "value") else str(cond or "")
 
-    msg = getattr(self._target_status, "message", None)
-    if msg:
-      lines.append(f"Keterangan: {msg}")
+        if cond_val == "active":
+            return f"{prefix} • 🟢 {email}" if email else f"{prefix} • 🟢 Aktif"
+        elif cond_val == "unrecorded":
+            return f"{prefix} • 🟡 Tidak tercatat"
+        elif cond_val == "invalid_file":
+            return f"{prefix} • 🔴 File tidak valid"
+        elif cond_val == "none":
+            return f"{prefix} • ⚪ Belum login"
+        elif cond_val == "drift_gemini":
+            return f"{prefix} • 🟡 Drift (~/.gemini)"
+        elif cond_val == "unavailable":
+            return f"{prefix} • ⛔ Tidak tersedia"
+        elif cond_val == "locked":
+            return f"{prefix} • 🔒 Keyring terkunci"
+        elif cond_val == "error":
+            return f"{prefix} • 🔴 Error"
+        return prefix
 
-    unavail = getattr(self._target_status, "unavailable_reason", None)
-    if unavail:
-      lines.append(f"Alasan: {unavail}")
+    def _full_tooltip(self) -> str:
+        lines = [self._full_label()]
+        if not self._target_status:
+            return lines[0]
 
-    sessions = getattr(self._target_status, "sessions_summary", None)
-    if sessions:
-      lines.append(f"Sesi agy: {sessions}")
+        email = getattr(self._target_status, "email", None)
+        if email:
+            lines.append(f"Email Aktif: {email}")
 
-    err = getattr(self._target_status, "error", None)
-    if err:
-      lines.append(f"Error: {err}")
+        cond = getattr(self._target_status, "condition", None)
+        cond_val = cond.value if hasattr(cond, "value") else str(cond or "")
+        lines.append(f"Kondisi: {cond_val}")
 
-    return "\n".join(lines)
+        msg = getattr(self._target_status, "message", None)
+        if msg:
+            lines.append(f"Keterangan: {msg}")
 
-  def _update_display(self) -> None:
-    full_text = self._full_label()
-    # Lebar teks penuh dihitung independen dari teks yang sedang tampil agar
-    # elide tidak berosilasi ketika sizeHint berubah mengikuti teks terpangkas.
-    full_width = (
-        self.fontMetrics().horizontalAdvance(full_text)
-        + _CHIP_HORIZONTAL_CHROME
-    )
-    if 0 < self.width() < full_width:
-      text = self.fontMetrics().elidedText(
-          full_text,
-          Qt.TextElideMode.ElideRight,
-          max(0, self.width() - _CHIP_HORIZONTAL_CHROME),
-      )
-    else:
-      text = full_text
-    self.setText(text)
-    self.setToolTip(self._full_tooltip())
+        unavail = getattr(self._target_status, "unavailable_reason", None)
+        if unavail:
+            reason_text = _UNAVAIL_REASON_TEXT.get(unavail, unavail)
+            lines.append(f"Alasan: {reason_text}")
+
+        sessions = getattr(self._target_status, "sessions_summary", None)
+        if sessions:
+            lines.append(f"Sesi agy: {sessions}")
+
+        err = getattr(self._target_status, "error", None)
+        if err:
+            lines.append(f"Error: {err}")
+
+        return "\n".join(lines)
+
+    def _update_display(self) -> None:
+        full_text = self._full_label()
+        # Lebar teks penuh dihitung independen dari teks yang sedang tampil agar
+        # elide tidak berosilasi ketika sizeHint berubah mengikuti teks terpangkas.
+        full_width = (
+            self.fontMetrics().horizontalAdvance(full_text)
+            + _CHIP_HORIZONTAL_CHROME
+        )
+        if 0 < self.width() < full_width:
+            text = self.fontMetrics().elidedText(
+                full_text,
+                Qt.TextElideMode.ElideRight,
+                max(0, self.width() - _CHIP_HORIZONTAL_CHROME),
+            )
+        else:
+            text = full_text
+        self.setText(text)
+        self.setToolTip(self._full_tooltip())

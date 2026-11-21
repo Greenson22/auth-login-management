@@ -221,6 +221,40 @@ class SettingsDialog(QDialog):
 
     content_layout.addWidget(crypto_group)
 
+    # =========================================================================
+    # 4. Group Integrasi (auto_kill_agy + write_gemini_files)
+    # =========================================================================
+    integrasi_group = QGroupBox("Integrasi")
+    integrasi_layout = QVBoxLayout(integrasi_group)
+    integrasi_layout.setSpacing(8)
+
+    integrasi_desc = QLabel(
+        "Pengaturan perilaku saat menerapkan akun ke <b>Antigravity CLI</b>:"
+    )
+    integrasi_desc.setWordWrap(True)
+    integrasi_layout.addWidget(integrasi_desc)
+
+    self.chk_auto_kill_agy = QCheckBox("Hentikan sesi agy otomatis (tanpa dialog konfirmasi)")
+    self.chk_auto_kill_agy.setToolTip(
+        "Jika dicentang, proses agy yang sedang berjalan akan dihentikan otomatis\n"
+        "saat Apply ke Antigravity CLI tanpa memunculkan dialog konfirmasi.\n"
+        "Default: mati (selalu tanya konfirmasi)."
+    )
+    integrasi_layout.addWidget(self.chk_auto_kill_agy)
+
+    self.chk_write_gemini_files = QCheckBox(
+        "Tulis file ~/.gemini (oauth_creds.json & google_accounts.json) saat Apply CLI"
+    )
+    self.chk_write_gemini_files.setToolTip(
+        "Jika dicentang, Apply ke Antigravity CLI juga menyinkronkan file\n"
+        "~/.gemini/oauth_creds.json dan google_accounts.json.\n"
+        "Default: aktif (sinkronkan file).\n"
+        "Nonaktifkan bila Anda hanya ingin memperbarui keyring."
+    )
+    integrasi_layout.addWidget(self.chk_write_gemini_files)
+
+    content_layout.addWidget(integrasi_group)
+
     scroll_area.setWidget(container_widget)
     main_layout.addWidget(scroll_area)
 
@@ -595,6 +629,22 @@ class SettingsDialog(QDialog):
       self._turso_token_already_saved = False
 
     self._on_turso_toggled(use_turso)
+
+    # Integrasi
+    auto_kill_val = self.settings.value("auto_kill_agy", False)
+    if isinstance(auto_kill_val, str):
+      auto_kill = auto_kill_val.lower() in ("true", "1")
+    else:
+      auto_kill = bool(auto_kill_val)
+    self.chk_auto_kill_agy.setChecked(auto_kill)
+
+    write_gemini_val = self.settings.value("write_gemini_files", True)
+    if isinstance(write_gemini_val, str):
+      write_gemini = write_gemini_val.lower() not in ("false", "0")
+    else:
+      write_gemini = bool(write_gemini_val) if write_gemini_val is not True else True
+    self.chk_write_gemini_files.setChecked(write_gemini)
+
     self._is_loading = False
 
   def _save_settings(self):
@@ -678,6 +728,10 @@ class SettingsDialog(QDialog):
     self.settings.setValue("use_turso", use_turso)
     self.settings.setValue("turso_url", turso_url)
     self.settings.setValue("turso_token", turso_token)
+
+    # Simpan integrasi
+    self.settings.setValue("auto_kill_agy", self.chk_auto_kill_agy.isChecked())
+    self.settings.setValue("write_gemini_files", self.chk_write_gemini_files.isChecked())
 
     QMessageBox.information(
         self, "Sukses", "Pengaturan berhasil disimpan!"
