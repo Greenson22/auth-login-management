@@ -19,7 +19,8 @@ from src.ui.utils import parse_quota_info
 class AccountTableWidget(QWidget):
   """Komponen tabel daftar akun lengkap dengan filter kategori, pemisah data, pengurutan, dan menu konteks."""
 
-  # Sinyal untuk aksi context menu
+  # Sinyal untuk aksi context menu & double-click
+  apply_requested = pyqtSignal(str, str)  # account_id, target ("opencode" atau "antigravity_cli")
   copy_requested = pyqtSignal(str)
   update_file_requested = pyqtSignal(str, str)
   update_db_requested = pyqtSignal(str, str)
@@ -116,9 +117,23 @@ class AccountTableWidget(QWidget):
     self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
     self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     self.table.customContextMenuRequested.connect(self._show_context_menu)
+    self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
 
     layout.addLayout(control_layout)
     layout.addWidget(self.table)
+
+  def _on_cell_double_clicked(self, row: int, _column: int):
+    """Double click pada baris akun memicu apply ke selected target."""
+    first_item = self.table.item(row, 0)
+    if not first_item:
+      return
+    role_data = first_item.data(Qt.ItemDataRole.UserRole)
+    if not role_data or role_data == self.SEPARATOR_ROLE_VALUE:
+      return
+
+    account_id = role_data
+    # Emit apply_requested dengan target kosong/selected target (ditangani oleh MainWindow)
+    self.apply_requested.emit(account_id, "")
 
   def _on_sort_changed(self, index: int):
     self.sort_mode_changed.emit(index)
@@ -486,6 +501,30 @@ class AccountTableWidget(QWidget):
     current_category = str(cat_item.data(Qt.ItemDataRole.UserRole) or "") if cat_item else ""
 
     menu = QMenu(self)
+
+    # Submenu "Terapkan ke…"
+    apply_menu = menu.addMenu("  🚀 Terapkan ke…")
+    action_apply_opencode = apply_menu.addAction("OpenCode")
+
+    action_apply_cli = apply_menu.addAction("Antigravity CLI")
+    # Evaluasi availability CLI dari overall_status jika ada
+    cli_available = False
+    cli_unavailable_reason = "Target belum siap"
+    if self._overall_status is not None:
+      cli_status = getattr(self._overall_status, "antigravity_cli", None)
+      if cli_status is not None:
+        cond = getattr(cli_status, "condition", None)
+        cond_val = cond.value if hasattr(cond, "value") else str(cond or "")
+        if cond_val not in ("unavailable", "error"):
+          cli_available = True
+        else:
+          cli_unavailable_reason = getattr(cli_status, "message", None) or getattr(cli_status, "unavailable_reason", None) or "Target tidak tersedia"
+    
+    action_apply_cli.setEnabled(cli_available)
+    if not cli_available:
+      action_apply_cli.setToolTip(f"Tidak tersedia: {cli_unavailable_reason}")
+
+    menu.addSeparator()
     action_copy = menu.addAction("  📋 Copy JSON")
     action_update_file = menu.addAction("  💾 Update ke antigravity-accounts.json")
     action_update_db = menu.addAction(
@@ -498,7 +537,11 @@ class AccountTableWidget(QWidget):
     action_delete = menu.addAction("  🗑️ Hapus Akun")
 
     chosen_action = menu.exec(self.table.viewport().mapToGlobal(pos))
-    if chosen_action == action_copy:
+    if chosen_action == action_apply_opencode:
+      self.apply_requested.emit(account_id, "opencode")
+    elif chosen_action == action_apply_cli:
+      self.apply_requested.emit(account_id, "antigravity_cli")
+    elif chosen_action == action_copy:
       self.copy_requested.emit(account_id)
     elif chosen_action == action_update_file:
       self.update_file_requested.emit(account_id, email)

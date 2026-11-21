@@ -74,6 +74,7 @@ class MainWindow(QMainWindow):
     self.account_table.category_filter_changed.connect(self._on_category_filter_changed)
     self.account_table.manage_categories_requested.connect(self.open_category_management_dialog)
     self.account_table.bulk_change_category_requested.connect(self.bulk_change_account_category)
+    self.account_table.apply_requested.connect(self.apply_account_to_target)
     self.config_bar.target_changed.connect(self._on_target_changed)
     self.account_table.copy_requested.connect(self.copy_account_json)
     self.account_table.update_file_requested.connect(self.update_antigravity_file)
@@ -485,6 +486,55 @@ class MainWindow(QMainWindow):
     self.run_async_task(
         "Menyiapkan Data",
         "Mendekripsi dan merekonstruksi format JSON...",
+        task,
+        on_success,
+        on_failed,
+    )
+
+  # ─── Apply Akun ke Target (OpenCode / Antigravity CLI) ───
+
+  def apply_account_to_target(self, account_id: str, target: str = ""):
+    """Menerapkan akun ke target yang dipilih (atau active target jika target kosong)."""
+    if not self.facade:
+      QMessageBox.warning(self, "Layanan Belum Siap", "Layanan integrasi belum siap.")
+      return
+
+    effective_target = target if target else self.config_bar.get_active_target()
+    pwd = self._get_encryption_password()
+
+    def task():
+      plan = self.facade.build_plan(account_id, effective_target, password=pwd)
+      if plan.error_code:
+        return plan, None
+      result = self.facade.apply(plan)
+      return plan, result
+
+    def on_success(res):
+      plan, apply_result = res
+      if plan.error_code or (apply_result and apply_result.status.value == "FAILED"):
+        err_msg = plan.error_message if plan.error_code else apply_result.user_message
+        suggestion = apply_result.action_suggestion if apply_result else ""
+        full_msg = f"{err_msg}\n\n{suggestion}" if suggestion else err_msg
+        QMessageBox.warning(self, "Gagal Menerapkan Akun", full_msg)
+        return
+
+      if apply_result and apply_result.status.value == "SUCCESS":
+        target_name = "OpenCode" if effective_target == "opencode" else "Antigravity CLI"
+        accounts_cnt = apply_result.accounts_count
+        count_str = f" ({accounts_cnt} akun di file)" if accounts_cnt is not None else ""
+        QMessageBox.information(
+            self,
+            "Berhasil Menerapkan Akun",
+            f"Akun <b>{apply_result.email}</b> berhasil diterapkan ke <b>{target_name}</b>{count_str}!",
+        )
+        self.reload_accounts()
+
+    def on_failed(e):
+      QMessageBox.critical(self, "Error", f"Terjadi kesalahan saat menerapkan akun:\n\n{str(e)}")
+
+    self.run_async_task(
+        "Menerapkan Akun",
+        f"Menerapkan akun ke target {effective_target}...",
         task,
         on_success,
         on_failed,

@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from src.targets import TARGET_ANTIGRAVITY_CLI, TARGET_OPENCODE, normalize_target
 
+from .backup import cleanup_old_backups, create_opencode_backup
 from .ports import (
     AccountStoragePort,
     ApplyPlan,
@@ -106,7 +107,8 @@ class AntigravityFacade:
   ) -> ApplyPlan:
     """Preflight, validasi, dan deteksi sesi tanpa menulis perubahan apa pun."""
     canonical_target = normalize_target(target)
-    # Bentuk dasar plan; implementasi penuh validasi token & sesi diselesaikan di tiket 05/09
+
+    # 1. Rekonstruksi snapshot akun dari DB
     try:
       account = self.account_storage.reconstruct_account(account_id, password=password)
     except Exception as exc:
@@ -116,6 +118,44 @@ class AntigravityFacade:
           target_available=False,
           error_code="account_reconstruction_failed",
           error_message=str(exc),
+      )
+
+    email = account.get("email")
+    if not email:
+      return ApplyPlan(
+          account_snapshot=account,
+          target=canonical_target,
+          target_available=False,
+          error_code="account_has_no_email",
+          error_message="Akun tidak memiliki alamat email yang valid.",
+      )
+
+    # 2. Validasi per-target
+    if canonical_target == TARGET_OPENCODE:
+      # Validasi OpenCode: folder target & file harus valid, accounts harus array
+      data, error_cond = self.opencode_file.read_accounts_data()
+      if error_cond is not None or not isinstance(data, dict):
+        return ApplyPlan(
+            account_snapshot=account,
+            target=canonical_target,
+            target_available=False,
+            error_code="invalid_opencode_file",
+            error_message="File antigravity-accounts.json tidak ditemukan atau bukan objek JSON yang valid.",
+        )
+      accounts = data.get("accounts")
+      if not isinstance(accounts, list):
+        return ApplyPlan(
+            account_snapshot=account,
+            target=canonical_target,
+            target_available=False,
+            error_code="invalid_accounts_array",
+            error_message="Field 'accounts' di antigravity-accounts.json bukan array.",
+        )
+
+      return ApplyPlan(
+          account_snapshot=account,
+          target=canonical_target,
+          target_available=True,
       )
 
     return ApplyPlan(
@@ -133,8 +173,7 @@ class AntigravityFacade:
   ) -> ApplyResult:
     """Eksekusi rencana apply.
 
-    Implementasi apply penuh untuk OpenCode ada di tiket 05 dan CLI di tiket 09.
-    Pada tiket 04, operasi sudah ada dan siap menerima panggilan.
+    Implementasi apply penuh untuk OpenCode (tiket 05) dan CLI (tiket 09).
     """
     if plan.error_code:
       return ApplyResult(
@@ -142,10 +181,116 @@ class AntigravityFacade:
           code=plan.error_code,
           user_message=plan.error_message or "Plan tidak valid",
       )
+
+    if plan.target == TARGET_OPENCODE:
+      return self._apply_opencode(plan)
+
     return ApplyResult(
         status=ApplyStatus.SUCCESS,
         user_message="Operasi apply belum diterapkan sepenuhnya pada tiket ini.",
         email=plan.account_snapshot.get("email"),
+    )
+
+  def _apply_opencode(self, plan: ApplyPlan) -> ApplyResult:
+    account_snapshot = plan.account_snapshot
+    email = str(account_snapshot.get("email", "")).strip()
+    account_id = account_snapshot.get("id")
+
+    # Pastikan file masih valid sebelum backup
+    data, error_cond = self.opencode_file.read_accounts_data()
+    if error_cond is not None or not isinstance(data, dict):
+      return ApplyResult(
+          status=ApplyStatus.FAILED,
+          code="invalid_opencode_file",
+          user_message="File antigravity-accounts.json tidak ditemukan atau bukan objek JSON yang valid.",
+          action_suggestion="Periksa path folder OpenCode di Pengaturan.",
+      )
+
+    accounts = data.get("accounts")
+    if not isinstance(accounts, list):
+      return ApplyResult(
+          status=ApplyStatus.FAILED,
+          code="invalid_accounts_array",
+          user_message="Field 'accounts' di antigravity-accounts.json bukan array.",
+          action_suggestion="Perbaiki struktur JSON file antigravity-accounts.json.",
+      )
+
+    # 1. Snapshot backup file lama sebelum penulisan
+    file_path = None
+    if hasattr(self.opencode_file, "get_file_path"):
+      file_path = self.opencode_file.get_file_path()
+    elif hasattr(self.opencode_file, "_get_file_path"):
+      file_path = self.opencode_file._get_file_path()
+
+    backup_location = ""
+    if file_path:
+      try:
+        backup_dir = create_opencode_backup(
+            file_path=file_path,
+            email=email,
+            clock_now=self.clock.now(),
+        )
+        backup_location = str(backup_dir)
+      except Exception as exc:
+        logger.warning("Gagal membuat backup OpenCode: %s", exc)
+
+    # 2. Upsert akun
+    existing_idx = None
+    target_clean = email.lower()
+    for idx, acc in enumerate(accounts):
+      if isinstance(acc, dict):
+        acc_email = str(acc.get("email", "")).strip().lower()
+        if acc_email == target_clean:
+          existing_idx = idx
+          break
+
+    if existing_idx is not None:
+      accounts[existing_idx] = account_snapshot
+      upsert_idx = existing_idx
+    else:
+      accounts.append(account_snapshot)
+      upsert_idx = len(accounts) - 1
+
+    # 3. Perbarui activeIndex dan activeIndexByFamily
+    data["activeIndex"] = upsert_idx
+    families = data.get("activeIndexByFamily")
+    if isinstance(families, dict):
+      if "gemini" in families:
+        families["gemini"] = upsert_idx
+      if "claude" in families:
+        families["claude"] = upsert_idx
+
+    # 4. Tulis file secara atomic
+    try:
+      self.opencode_file.write_accounts_data(data)
+    except Exception as exc:
+      logger.exception("Gagal menulis file OpenCode")
+      return ApplyResult(
+          status=ApplyStatus.FAILED,
+          code="write_failed",
+          user_message=f"Gagal menulis file OpenCode: {exc}",
+          action_suggestion="Periksa izin penulisan file dan folder.",
+          backup_location=backup_location,
+      )
+
+    # 5. Tandai DB: applied_target='opencode' & last_applied_at=epoch detik
+    applied_time = int(self.clock.now())
+    try:
+      if account_id:
+        self.account_storage.mark_applied(account_id, TARGET_OPENCODE, applied_at=applied_time)
+    except Exception as db_exc:
+      logger.warning("Gagal menandai applied di database: %s", db_exc)
+
+    # 6. Bersihkan backup lama (retensi 30)
+    cleanup_old_backups(max_keep=30)
+
+    total_accounts = len(accounts)
+    return ApplyResult(
+        status=ApplyStatus.SUCCESS,
+        user_message=f"Akun {email} berhasil diterapkan ke OpenCode ({total_accounts} akun di file).",
+        email=email,
+        accounts_count=total_accounts,
+        backup_location=backup_location,
     )
 
   def read_status(self) -> OverallStatus:

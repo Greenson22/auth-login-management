@@ -29,7 +29,14 @@ class ProductionAccountStoragePort:
     self.db = db
 
   def reconstruct_account(self, account_id: str, password: str = "") -> Dict[str, Any]:
-    return self.db.reconstruct_json_by_id(account_id, current_password=password)
+    raw_json = self.db.reconstruct_json_by_id(account_id, password=password)
+    if not raw_json:
+      raise ValueError(f"Akun {account_id} tidak ditemukan di database")
+    data = json.loads(raw_json)
+    accounts = data.get("accounts", [])
+    if not accounts:
+      raise ValueError(f"Rekonstruksi akun {account_id} menghasilkan accounts kosong")
+    return accounts[0]
 
   def mark_applied(self, account_id: str, target: str, applied_at: Optional[int] = None) -> bool:
     return self.db.mark_applied(account_id, target, applied_at=applied_at)
