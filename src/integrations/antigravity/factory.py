@@ -259,14 +259,14 @@ class ProductionOAuthPort:
     raise NotImplementedError("OAuth exchange nyata tersedia di tiket 09")
 
 
-class ProductionProcessManagerPort:
-  """Port proses manager nyata (tiket 07)."""
+from .process import AgySession, LinuxProcessManager
 
-  def detect_sessions(self) -> List[Any]:
-    return []
 
-  def terminate_sessions(self, sessions: List[Any], poll_timeout: float = 5.0) -> bool:
-    return True
+class ProductionProcessManagerPort(LinuxProcessManager):
+  """Port proses manager nyata (tiket 07) berbasis Linux /proc."""
+
+  def __init__(self):
+    super().__init__()
 
 
 def create_facade(

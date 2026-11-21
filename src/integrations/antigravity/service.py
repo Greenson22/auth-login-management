@@ -158,10 +158,72 @@ class AntigravityFacade:
           target_available=True,
       )
 
+    # Validasi Antigravity CLI (tiket 06, 07, 09)
+    # Availability check
+    if not self.environment.is_linux():
+      return ApplyPlan(
+          account_snapshot=account,
+          target=canonical_target,
+          target_available=False,
+          unavailable_reason="unsupported_os",
+          error_code="unsupported_os",
+          error_message="Target Antigravity CLI hanya didukung di OS Linux.",
+      )
+    if self.environment.is_root():
+      return ApplyPlan(
+          account_snapshot=account,
+          target=canonical_target,
+          target_available=False,
+          unavailable_reason="root",
+          error_code="root",
+          error_message="Aplikasi dijalankan sebagai root (tidak aman).",
+      )
+    if not self.environment.is_dbus_available():
+      return ApplyPlan(
+          account_snapshot=account,
+          target=canonical_target,
+          target_available=False,
+          unavailable_reason="no_dbus",
+          error_code="no_dbus",
+          error_message="D-Bus / Secret Service tidak tersedia.",
+      )
+    if self.environment.is_keyring_locked():
+      return ApplyPlan(
+          account_snapshot=account,
+          target=canonical_target,
+          target_available=False,
+          unavailable_reason="keyring_locked",
+          error_code="keyring_locked",
+          error_message="Keyring terkunci. Silakan buka keyring terlebih dahulu.",
+      )
+
+    # Deteksi sesi agy
+    try:
+      sessions = self.process_manager.detect_sessions()
+    except Exception as exc:
+      logger.exception("Gagal membaca /proc untuk deteksi sesi agy")
+      return ApplyPlan(
+          account_snapshot=account,
+          target=canonical_target,
+          target_available=False,
+          error_code="proc_unreadable",
+          error_message="Tidak dapat membaca /proc (periksa proses manual). Tidak ada perubahan yang ditulis.",
+      )
+
+    auto_kill = kwargs.get("auto_kill_agy", False)
+    # Sesi hidup (R, S, D, T, t) memerlukan penanganan
+    alive_sessions = [
+        s for s in sessions
+        if getattr(s, "is_alive", True) and not getattr(s, "is_zombie", False)
+    ]
+    requires_confirmation = bool(alive_sessions and not auto_kill)
+
     return ApplyPlan(
         account_snapshot=account,
         target=canonical_target,
         target_available=True,
+        detected_sessions=sessions,
+        requires_confirmation=requires_confirmation,
     )
 
   def apply(
@@ -185,10 +247,108 @@ class AntigravityFacade:
     if plan.target == TARGET_OPENCODE:
       return self._apply_opencode(plan)
 
+    # Apply Antigravity CLI
+    return self._apply_cli(plan, allow_kill=allow_kill, **kwargs)
+
+  def _apply_cli(
+      self,
+      plan: ApplyPlan,
+      *,
+      allow_kill: bool = False,
+      **kwargs: Any,
+  ) -> ApplyResult:
+    # 1. Periksa sesi yang berjalan
+    try:
+      current_sessions = self.process_manager.detect_sessions()
+    except Exception as exc:
+      return ApplyResult(
+          status=ApplyStatus.FAILED,
+          code="proc_unreadable",
+          user_message="Gagal memeriksa proses: tidak dapat membaca /proc. Periksa proses manual.",
+          action_suggestion="Pastikan aplikasi memiliki izin mengakses /proc.",
+      )
+
+    alive_sessions = [
+        s for s in current_sessions
+        if getattr(s, "is_alive", True) and not getattr(s, "is_zombie", False)
+    ]
+
+    if alive_sessions:
+      if not allow_kill:
+        return ApplyResult(
+            status=ApplyStatus.FAILED,
+            code="sessions_still_running",
+            user_message="Terdapat sesi agy yang masih berjalan dan izin penghentian belum diberikan.",
+            action_suggestion="Hentikan sesi agy sebelum menerapkan kredensial ke Antigravity CLI.",
+        )
+
+      # Lakukan penghentian sesi
+      terminate_fn = getattr(self.process_manager, "terminate_sessions", None)
+      if terminate_fn is not None:
+        on_progress = kwargs.get("on_progress")
+        is_cancelled = kwargs.get("is_cancelled")
+        try:
+          # Cek signature terminate_sessions (bisa tuple atau bool)
+          term_res = terminate_fn(
+              alive_sessions,
+              on_progress=on_progress,
+              is_cancelled=is_cancelled,
+          )
+        except TypeError:
+          term_res = terminate_fn(alive_sessions)
+
+        if isinstance(term_res, tuple):
+          success, failed_pids, err_msg = term_res
+        else:
+          success = bool(term_res)
+          failed_pids = []
+          err_msg = ""
+
+        if is_cancelled and is_cancelled():
+          return ApplyResult(
+              status=ApplyStatus.CANCELLED,
+              code="cancelled",
+              user_message="Penantian penghentian sesi dibatalkan oleh pengguna. Tidak ada penulisan.",
+          )
+
+        if not success:
+          pids_str = ", ".join(str(p) for p in failed_pids) if failed_pids else "agy"
+          return ApplyResult(
+              status=ApplyStatus.FAILED,
+              code="kill_failed",
+              user_message=err_msg or f"Gagal menghentikan sesi agy pada PID: {pids_str}.",
+              action_suggestion="Jalankan manual: pkill -9 -x agy lalu coba lagi. Tidak ada perubahan yang ditulis.",
+          )
+
+      # Deteksi ulang tepat sebelum penulisan untuk menutup race sesi baru yang muncul
+      try:
+        recheck_sessions = self.process_manager.detect_sessions()
+      except Exception as exc:
+        return ApplyResult(
+            status=ApplyStatus.FAILED,
+            code="proc_unreadable",
+            user_message="Gagal memverifikasi proses sebelum penulisan: tidak dapat membaca /proc.",
+        )
+
+      recheck_alive = [
+          s for s in recheck_sessions
+          if getattr(s, "is_alive", True) and not getattr(s, "is_zombie", False)
+      ]
+      if recheck_alive:
+        pids_str = ", ".join(str(getattr(s, "pid", s)) for s in recheck_alive)
+        return ApplyResult(
+            status=ApplyStatus.FAILED,
+            code="new_sessions_detected",
+            user_message=f"Sesi agy baru terdeteksi (PID: {pids_str}) sebelum penulisan.",
+            action_suggestion="Tutup sesi agy dan coba lagi. Tidak ada perubahan yang ditulis.",
+        )
+
+    # Pada tiket 07, alur pengelolaan sesi selesai. Tiket 09 akan melanjutkan ke snapshot & tulis.
+    email = plan.account_snapshot.get("email")
     return ApplyResult(
         status=ApplyStatus.SUCCESS,
-        user_message="Operasi apply belum diterapkan sepenuhnya pada tiket ini.",
-        email=plan.account_snapshot.get("email"),
+        user_message=f"Sesi agy bersih. Kesiapan apply CLI terverifikasi untuk {email}.",
+        email=email,
     )
 
   def _apply_opencode(self, plan: ApplyPlan) -> ApplyResult:
@@ -420,11 +580,27 @@ class AntigravityFacade:
             unavailable_reason="keyring_locked",
             message="Keyring terkunci.",
         )
+
+      # Baca ringkasan sesi agy untuk tooltip
+      sessions_summary = None
+      try:
+        if hasattr(self.process_manager, "summarize_sessions"):
+          sessions_summary = self.process_manager.summarize_sessions()
+        elif hasattr(self.process_manager, "detect_sessions"):
+          sessions = self.process_manager.detect_sessions()
+          alive_cnt = sum(1 for s in sessions if getattr(s, "is_alive", True) and not getattr(s, "is_zombie", False))
+          stopped_cnt = sum(1 for s in sessions if getattr(s, "is_stopped", False))
+          zombie_cnt = sum(1 for s in sessions if getattr(s, "is_zombie", False))
+          sessions_summary = {"alive": alive_cnt, "stopped": stopped_cnt, "zombie": zombie_cnt}
+      except Exception as p_exc:
+        logger.debug("Tidak dapat membaca ringkasan sesi agy: %s", p_exc)
+
       # Jika dasar terpenuhi, kembalikan status NONE default jika belum dibaca tiket 10
       return TargetStatus(
           target=TARGET_ANTIGRAVITY_CLI,
           condition=TargetCondition.NONE,
           message="Belum login ke Antigravity CLI.",
+          sessions_summary=sessions_summary,
       )
     except Exception as exc:
       return TargetStatus(
