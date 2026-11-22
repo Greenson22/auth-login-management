@@ -1,5 +1,6 @@
 import json
 import os
+from typing import Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QIcon, QKeySequence
@@ -929,6 +930,30 @@ class MainWindow(QMainWindow):
 
   # ─── Refresh Quota (Gemini & Claude) ───
 
+  def _sync_keyring_token_if_active(self, account_id: str, email: str, password: str = "") -> Optional[str]:
+    """Jika akun ini sedang aktif di Antigravity CLI, sinkronkan refresh_token terbaru dari keyring ke database."""
+    if not self.facade or not hasattr(self.facade, "keyring") or not self.facade.keyring:
+      return None
+
+    from src.integrations.antigravity.constants import KEYRING_SERVICE, KEYRING_USERNAME
+    try:
+      raw_kr = self.facade.keyring.read(KEYRING_SERVICE, KEYRING_USERNAME)
+      if not raw_kr:
+        return None
+      kr_data = json.loads(raw_kr.decode("utf-8"))
+      kr_email = str(kr_data.get("id_token_email", "")).strip().lower()
+      target_email = str(email).strip().lower()
+
+      if kr_email and kr_email == target_email:
+        token_info = kr_data.get("token", {})
+        latest_rt = token_info.get("refresh_token")
+        if latest_rt:
+          self.db.update_refresh_token(account_id, latest_rt, password=password)
+          return latest_rt
+    except Exception:
+      pass
+    return None
+
   def _extract_account_dict(self, account_id: str, password: str = "") -> dict:
     """Helper untuk merekonstruksi dan mengembalikan dictionary akun pertama dari database."""
     raw_json = self.db.reconstruct_json_by_id(account_id, password=password)
@@ -956,6 +981,9 @@ class MainWindow(QMainWindow):
     enc_pw = self._get_encryption_password()
 
     def task():
+      # Sinkronkan token dari Keyring jika akun ini sedang aktif di Antigravity CLI
+      self._sync_keyring_token_if_active(account_id, email, password=enc_pw)
+
       acc_data = self._extract_account_dict(account_id, password=enc_pw)
       rt = acc_data.get("refreshToken")
       pid = acc_data.get("projectId") or "aicode-consumers"
@@ -1004,6 +1032,9 @@ class MainWindow(QMainWindow):
       results = []
       for acc_id, email in account_list:
         try:
+          # Sinkronkan token dari Keyring jika akun ini sedang aktif di Antigravity CLI
+          self._sync_keyring_token_if_active(acc_id, email, password=enc_pw)
+
           acc_data = self._extract_account_dict(acc_id, password=enc_pw)
           rt = acc_data.get("refreshToken")
           if not rt:
@@ -1083,6 +1114,9 @@ class MainWindow(QMainWindow):
       total = len(all_accounts)
       for idx, (acc_id, email) in enumerate(all_accounts):
         try:
+          # Sinkronkan token dari Keyring jika akun ini sedang aktif di Antigravity CLI
+          self._sync_keyring_token_if_active(acc_id, email, password=enc_pw)
+
           acc_data = self._extract_account_dict(acc_id, password=enc_pw)
           rt = acc_data.get("refreshToken")
           if not rt:
