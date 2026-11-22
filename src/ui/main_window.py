@@ -966,7 +966,7 @@ class MainWindow(QMainWindow):
       if not quotas:
         raise ValueError("Server tidak mengembalikan informasi kuota untuk akun ini.")
 
-      self.db.update_account_quotas(account_id, quotas)
+      self.db.update_account_quotas(account_id, quotas, password=enc_pw)
       return quotas
 
     def on_success(quotas):
@@ -1014,7 +1014,7 @@ class MainWindow(QMainWindow):
           if not quotas:
             results.append((acc_id, email, False, "Data kuota kosong"))
             continue
-          self.db.update_account_quotas(acc_id, quotas)
+          self.db.update_account_quotas(acc_id, quotas, password=enc_pw)
           results.append((acc_id, email, True, quotas))
         except Exception as ex:
           results.append((acc_id, email, False, str(ex)))
@@ -1093,7 +1093,7 @@ class MainWindow(QMainWindow):
           if not quotas:
             results.append((acc_id, email, False, "Data kuota kosong"))
             continue
-          self.db.update_account_quotas(acc_id, quotas)
+          self.db.update_account_quotas(acc_id, quotas, password=enc_pw)
           results.append((acc_id, email, True, quotas))
         except Exception as ex:
           results.append((acc_id, email, False, str(ex)))

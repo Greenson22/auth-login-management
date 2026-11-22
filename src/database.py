@@ -422,6 +422,7 @@ class AccountDatabase:
       account_id: str,
       quotas: Dict[str, Dict[str, Any]],
       updated_at_epoch: Optional[int] = None,
+      password: str = "",
   ) -> bool:
     """Memperbarui data kuota akun spesifik di tabel account_quotas dan cached_quota_updated_at di accounts."""
     if not account_id or not quotas:
@@ -430,6 +431,20 @@ class AccountDatabase:
     if updated_at_epoch is None:
       import time
       updated_at_epoch = int(time.time() * 1000)
+
+    # Periksa apakah akun terenkripsi
+    is_encrypted = False
+    check_query = "SELECT is_encrypted FROM accounts WHERE id = ?"
+    if self.use_turso and self.turso_client:
+      rows, _ = self.turso_client.execute(check_query, [account_id])
+      if rows:
+        is_encrypted = bool(rows[0][0])
+    else:
+      with self.get_connection() as conn:
+        cursor = conn.cursor()
+        row = cursor.execute(check_query, (account_id,)).fetchone()
+        if row:
+          is_encrypted = bool(row[0])
 
     sql_q = """
         INSERT INTO account_quotas (
@@ -448,23 +463,33 @@ class AccountDatabase:
         WHERE id = ?
     """
 
+    stored_updated_at = encrypt_value(updated_at_epoch, password) if (is_encrypted and password) else updated_at_epoch
+
     quota_args = []
     for model_name, q in quotas.items():
       rem_frac = q.get("remainingFraction")
       r_time = q.get("resetTime")
-      rf_reset = q.get("remainingFractionResetTime")
-      m_count = q.get("modelCount")
+      raw_rf_reset = q.get("remainingFractionResetTime")
+      raw_m_count = q.get("modelCount", 1)
+
+      if is_encrypted and password:
+        stored_remaining_reset = encrypt_value(raw_rf_reset, password)
+        stored_model_count = encrypt_value(raw_m_count, password)
+      else:
+        stored_remaining_reset = raw_rf_reset
+        stored_model_count = raw_m_count
+
       quota_args.append([
           account_id,
           model_name,
           rem_frac,
           r_time,
-          rf_reset,
-          m_count,
+          stored_remaining_reset,
+          stored_model_count,
       ])
 
     if self.use_turso and self.turso_client:
-      stmts = [(sql_acc, [updated_at_epoch, account_id])]
+      stmts = [(sql_acc, [stored_updated_at, account_id])]
       for args_q in quota_args:
         stmts.append((sql_q, args_q))
       self.turso_client.execute_pipeline(stmts)
@@ -472,7 +497,7 @@ class AccountDatabase:
     else:
       with self.get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(sql_acc, (updated_at_epoch, account_id))
+        cursor.execute(sql_acc, (stored_updated_at, account_id))
         for args_q in quota_args:
           cursor.execute(sql_q, args_q)
         conn.commit()
@@ -788,7 +813,7 @@ class AccountDatabase:
         final_last_used = decrypt_value(acc_row[6], password, None, strict=True)
         final_verification_required = decrypt_value(acc_row[7], password, False, strict=True)
         final_managed_project_id = decrypt_value(acc_row[8], password, None, strict=True)
-        final_cached_quota_updated_at = decrypt_value(acc_row[9], password, None, strict=True)
+        final_cached_quota_updated_at = decrypt_value(acc_row[9], password, fallback_raw=acc_row[9], strict=False)
         raw_rate_limit = acc_row[11] if len(acc_row) > 11 else None
         final_rate_limit_reset_times = decrypt_value(raw_rate_limit, password, {}, strict=True) or {}
 
@@ -857,8 +882,8 @@ class AccountDatabase:
       rem_frac = q[1]
       res_time = q[2]
       if is_encrypted:
-        rem_frac_res_time = decrypt_value(q[3], password, q[3], strict=True)
-        model_count = decrypt_value(q[4], password, q[4] or 1, strict=True)
+        rem_frac_res_time = decrypt_value(q[3], password, fallback_raw=q[3], strict=False)
+        model_count = decrypt_value(q[4], password, fallback_raw=q[4] or 1, strict=False)
       else:
         rem_frac_res_time = q[3]
         model_count = q[4] or 1
