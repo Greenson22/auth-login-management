@@ -8,6 +8,11 @@ on:
   pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Versi paket (kosongkan untuk otomatis, mis. 1.2.1)"
+        required: false
+        default: ""
 
 jobs:
   build-windows:
@@ -30,7 +35,7 @@ jobs:
 
       - name: Build with PyInstaller
         run: |
-          pyinstaller --noconfirm --onedir --windowed `
+          pyinstaller --noconfirm --clean --onedir --windowed `
             --name "AuthLoginManager" `
             --icon "assets/images/app_icon.ico" `
             --add-data "assets;assets" `
@@ -50,7 +55,10 @@ jobs:
 
   build-ubuntu:
     name: Build Ubuntu DEB
-    runs-on: ubuntu-latest
+    # PENTING: jangan pakai ubuntu-latest. Runner itu bergerak mengikuti
+    # distro terbaru sehingga library bundelan bisa membutuhkan glibc yang
+    # lebih baru daripada Ubuntu pengguna. Ubuntu 24.04 = glibc 2.39.
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -68,66 +76,65 @@ jobs:
 
       - name: Build with PyInstaller
         run: |
-          pyinstaller --noconfirm --onedir --windowed \
+          pyinstaller --noconfirm --clean --onedir --windowed \
             --name "auth-login-manager" \
             --icon "assets/images/app_icon.png" \
             --add-data "assets:assets" \
             src/main.py
 
-      - name: Create Launcher Wrapper Script
+      - name: Determine package version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          cat << 'EOF' > dist/auth-login-manager-wrapper
-          #!/bin/sh
-          exec /usr/lib/auth-login-manager/auth-login-manager "$@"
-          EOF
-          chmod +x dist/auth-login-manager-wrapper
+          if [ -n "${INPUT_VERSION}" ]; then
+            VERSION="${INPUT_VERSION}"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          elif [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            VERSION="0.0.0-pr${{ github.event.pull_request.number }}"
+          else
+            VERSION="1.0.0"
+          fi
+
+          if ! printf '%s' "${VERSION}" | grep -qE '^[0-9][0-9A-Za-z.+~-]*$'; then
+            echo "Versi tidak valid: ${VERSION}" >&2
+            exit 1
+          fi
+
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          echo "PACKAGE_NAME=auth-login-manager_${VERSION}_amd64" >> "${GITHUB_ENV}"
+          echo "==> Versi paket: ${VERSION}"
 
       - name: Package Debian (.deb)
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          if [ -z "$VERSION" ] || [ "$VERSION" = "main" ] || [ "$VERSION" = "master" ]; then
-            VERSION="1.0.0"
+          bash packaging/linux/build_deb.sh "${VERSION}"
+
+      - name: Smoke test DEB
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb "./dist/${PACKAGE_NAME}.deb"
+
+          # Jalankan lewat Xvfb supaya plugin Qt xcb (yang dipakai desktop
+          # sungguhan) benar-benar diuji. Aplikasi GUI akan berjalan terus
+          # sampai dihentikan timeout.
+          #
+          # Exit code 124 berarti aplikasi berhasil start dan masuk event loop.
+          # Exit code lain berarti aplikasi crash/gagal memuat library.
+          set +e
+          xvfb-run -a timeout 10 auth-login-manager > /tmp/smoke-test.log 2>&1
+          SMOKE_EXIT=$?
+          set -e
+
+          echo "--- Output smoke test ---"
+          cat /tmp/smoke-test.log || true
+          echo "-------------------------"
+
+          if [ "${SMOKE_EXIT}" -ne 124 ]; then
+            echo "Smoke test gagal: aplikasi keluar dengan kode ${SMOKE_EXIT}." >&2
+            exit 1
           fi
-          
-          ARCH="amd64"
-          PACKAGE_NAME="auth-login-manager_${VERSION}_${ARCH}"
-          BUILD_ROOT="build/deb/${PACKAGE_NAME}"
-          
-          mkdir -p "${BUILD_ROOT}/DEBIAN"
-          mkdir -p "${BUILD_ROOT}/usr/bin"
-          mkdir -p "${BUILD_ROOT}/usr/lib/auth-login-manager"
-          mkdir -p "${BUILD_ROOT}/usr/share/applications"
-          mkdir -p "${BUILD_ROOT}/usr/share/icons/hicolor/256x256/apps"
-          
-          # Salin isi direktori bundle PyInstaller
-          cp -r dist/auth-login-manager/* "${BUILD_ROOT}/usr/lib/auth-login-manager/"
-          
-          # Salin wrapper ke /usr/bin
-          cp dist/auth-login-manager-wrapper "${BUILD_ROOT}/usr/bin/auth-login-manager"
-          chmod +x "${BUILD_ROOT}/usr/bin/auth-login-manager"
-          
-          # Salin Desktop Entry
-          cp packaging/linux/auth-login-manager.desktop "${BUILD_ROOT}/usr/share/applications/"
-          chmod 644 "${BUILD_ROOT}/usr/share/applications/auth-login-manager.desktop"
-          
-          # Salin Icon
-          cp assets/images/app_icon.png "${BUILD_ROOT}/usr/share/icons/hicolor/256x256/apps/auth-login-manager.png"
-          chmod 644 "${BUILD_ROOT}/usr/share/icons/hicolor/256x256/apps/auth-login-manager.png"
-          
-          # Metadata DEBIAN/control
-          cat <<EOF > "${BUILD_ROOT}/DEBIAN/control"
-          Package: auth-login-manager
-          Version: ${VERSION}
-          Section: utils
-          Priority: optional
-          Architecture: ${ARCH}
-          Maintainer: Lemon Manis <lemon@example.com>
-          Description: JSON Account Manager
-           Aplikasi manajemen akun dan autentikasi JSON berbasis PyQt6 dengan dukungan sinkronisasi SQLite dan Turso.
-          EOF
-          
-          # Buat file deb
-          dpkg-deb --build --root-owner-group "${BUILD_ROOT}" "dist/${PACKAGE_NAME}.deb"
+
+          echo "Smoke test OK: aplikasi berhasil start."
 
       - name: Upload Ubuntu DEB Artifact
         uses: actions/upload-artifact@v4
