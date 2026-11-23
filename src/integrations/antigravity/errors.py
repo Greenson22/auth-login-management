@@ -28,6 +28,14 @@ class KeyringLockedError(KeyringError):
   """Keyring terkunci."""
 
 
+class KeyringItemNotFoundError(KeyringError):
+  """Item service=gemini/username=antigravity tidak ada di keyring."""
+
+
+class KeyringParseError(KeyringError):
+  """JSON keyring tidak bisa diparsing atau tidak memiliki field yang diharapkan."""
+
+
 class OAuthError(IntegrationError):
   """Error respons dari endpoint OAuth."""
 
