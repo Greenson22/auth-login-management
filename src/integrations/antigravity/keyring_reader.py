@@ -72,13 +72,11 @@ class KeyringReader:
         # Baca dari keyring; tangkap error yang dilempar port
         try:
             raw_bytes = keyring.read(KEYRING_SERVICE, KEYRING_USERNAME)
+        except KeyringUnavailableError:
+            raise
+        except KeyringLockedError:
+            raise
         except Exception as exc:
-            # Periksa nama kelas agar tidak perlu mengimpor fakes.py
-            exc_type_name = type(exc).__name__
-            if exc_type_name == "KeyringUnavailableError" or isinstance(exc, KeyringUnavailableError):
-                raise KeyringUnavailableError(str(exc)) from exc
-            if exc_type_name == "KeyringLockedError" or isinstance(exc, KeyringLockedError):
-                raise KeyringLockedError(str(exc)) from exc
             raise KeyringUnavailableError(str(exc)) from exc
 
         if raw_bytes is None:

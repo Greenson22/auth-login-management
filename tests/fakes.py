@@ -59,13 +59,10 @@ class FakeClock:
 
 # ─── Keyring in-memory ───────────────────────────────────────────────────────
 
-
-class KeyringUnavailableError(RuntimeError):
-  """Keyring/D-Bus tidak dapat dihubungi."""
-
-
-class KeyringLockedError(RuntimeError):
-  """Keyring ada tetapi terkunci."""
+from src.integrations.antigravity.errors import (
+    KeyringLockedError,
+    KeyringUnavailableError,
+)
 
 
 class FakeKeyring:
