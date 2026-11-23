@@ -430,7 +430,7 @@ class AboutDialog(QDialog):
         }
     """)
     btn_email.clicked.connect(
-        lambda: QDesktopServices.openUrl(QUrl("mailto:frendydev1@gmail.com"))
+        lambda: QDesktopServices.openUrl(QUrl("mailto:frendyrikalgerung@gmail.com"))
     )
 
     btn_links_layout.addWidget(btn_linkedin)
@@ -438,7 +438,7 @@ class AboutDialog(QDialog):
     container_layout.addLayout(btn_links_layout)
 
     # 5. Versi Aplikasi
-    lbl_version = QLabel("Versi 2.1.0 (Build November 2026)")
+    lbl_version = QLabel("Versi 2.2.0 (Build November 2026)")
     lbl_version.setStyleSheet(
         "font-size: 11px; color: #888888; margin-top: 10px;"
     )
