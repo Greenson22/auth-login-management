@@ -35,19 +35,35 @@ from tests.fakes import FakeClock, FakeKeyring, FakeOAuth, FakeRoot, make_id_tok
 class FakeDBForDialog:
     """Fake minimal untuk AccountDatabase yang dipakai ImportDialog."""
 
-    def __init__(self, categories: Optional[List[str]] = None):
+    def __init__(
+        self,
+        categories: Optional[List[str]] = None,
+        existing_accounts: Optional[List[tuple]] = None,
+    ):
         self._categories = categories or ["Pribadi", "Kerja", "Testing"]
+        self._existing_accounts = existing_accounts or []
         self.inserted_or_updated: List[Dict[str, Any]] = []
         self.updated_tokens: List[Dict[str, Any]] = []
+        self.updated_quotas: List[Dict[str, Any]] = []
 
     def fetch_categories(self) -> List[str]:
         return list(self._categories)
 
-    def insert_or_update_json(self, json_str: str, encrypt: bool = False, password: str = "") -> bool:
+    def fetch_accounts_summary(self) -> List[tuple]:
+        return list(self._existing_accounts)
+
+    def insert_or_update_json(
+        self,
+        json_str: str,
+        encrypt: bool = False,
+        password: str = "",
+        category: str = "",
+    ) -> bool:
         self.inserted_or_updated.append({
             "json_str": json_str,
             "encrypt": encrypt,
             "password": password,
+            "category": category,
         })
         return True
 
@@ -55,6 +71,14 @@ class FakeDBForDialog:
         self.updated_tokens.append({
             "account_id": account_id,
             "new_token": new_token,
+            "password": password,
+        })
+        return True
+
+    def update_account_quotas(self, account_id: str, quota_data: dict, password: str = "") -> bool:
+        self.updated_quotas.append({
+            "account_id": account_id,
+            "quota_data": quota_data,
             "password": password,
         })
         return True
@@ -521,5 +545,243 @@ def test_quota_fetch_failure_shows_note_and_keeps_save_enabled(qtbot, monkeypatc
     assert dialog.lbl_quota_claude.text() == "-"
     # Tombol simpan tidak terpengaruh
     assert dialog.btn_save.isEnabled() is True
+
+
+# ─── Tests Tiket 05: Duplikat Email & Simpan ke DB ───────────────────────────
+
+
+def test_save_new_email_inserts_into_db(qtbot):
+    """Email baru: form tampil tanpa banner, tombol Simpan aktif, data tersimpan ke DB."""
+    keyring = FakeKeyring()
+    email = "newbie@example.com"
+    token = "1//rt_newbie_token"
+
+    keyring.write(
+        KEYRING_SERVICE,
+        KEYRING_USERNAME,
+        json.dumps({
+            "refresh_token": token,
+            "id_token": make_id_token(email),
+            "project_id": "proj-new",
+        }).encode("utf-8"),
+    )
+
+    db = FakeDBForDialog(existing_accounts=[("acc_other", "other@example.com")])
+    oauth = FakeOAuth()
+    oauth.respond_for(email, refresh_token=token)
+
+    dialog = ImportDialog(keyring=keyring, oauth=oauth, db=db, password="my_session_pwd")
+    qtbot.addWidget(dialog)
+
+    # Banner duplikat tidak muncul
+    assert not hasattr(dialog, "banner_label")
+    assert dialog.btn_save.isEnabled() is True
+
+    # Klik Simpan
+    dialog.btn_save.click()
+
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert len(db.inserted_or_updated) == 1
+    assert len(db.updated_tokens) == 0
+
+    saved = db.inserted_or_updated[0]
+    assert saved["encrypt"] is True
+    assert saved["password"] == "my_session_pwd"
+    data = json.loads(saved["json_str"])
+    acc = data["accounts"][0]
+    assert acc["email"] == email
+    assert acc["refreshToken"] == token
+    assert acc["projectId"] == "proj-new"
+
+
+def test_duplicate_email_shows_banner_and_disables_save_until_selected(qtbot):
+    """Email duplikat: banner kuning tampil, tombol Simpan nonaktif sampai tindakan dipilih."""
+    keyring = FakeKeyring()
+    email = "duplicate@example.com"
+    token = "1//rt_dup_token"
+
+    keyring.write(
+        KEYRING_SERVICE,
+        KEYRING_USERNAME,
+        json.dumps({
+            "refresh_token": token,
+            "id_token": make_id_token(email),
+        }).encode("utf-8"),
+    )
+
+    db = FakeDBForDialog(existing_accounts=[("acc_existing_123", "DUPLICATE@example.com")])
+    oauth = FakeOAuth()
+    oauth.respond_for(email, refresh_token=token)
+
+    dialog = ImportDialog(keyring=keyring, oauth=oauth, db=db)
+    qtbot.addWidget(dialog)
+
+    # Banner tampil
+    assert hasattr(dialog, "banner_label")
+    assert "acc_existing_123" in dialog.banner_label.text()
+
+    # Tombol Simpan dinonaktifkan
+    assert dialog.btn_save.isEnabled() is False
+
+    # Pilih radio Perbarui Token
+    dialog.radio_update.click()
+    assert dialog.btn_save.isEnabled() is True
+
+
+def test_duplicate_email_update_token_action(qtbot, monkeypatch):
+    """Email duplikat + pilih Perbarui Token: panggil update_refresh_token & update_account_quotas."""
+    import src.ui.components.import_dialog as dialog_mod
+
+    keyring = FakeKeyring()
+    email = "existing.user@example.com"
+    token = "1//rt_latest_token"
+
+    keyring.write(
+        KEYRING_SERVICE,
+        KEYRING_USERNAME,
+        json.dumps({
+            "refresh_token": token,
+            "id_token": make_id_token(email),
+        }).encode("utf-8"),
+    )
+
+    fake_quota = {"gemini-flash": {"remainingFraction": 0.9, "resetTime": "2026-11-25T00:00:00Z"}}
+    monkeypatch.setattr(dialog_mod, "fetch_account_quota", lambda rt, project_id="aicode-consumers": fake_quota)
+
+    db = FakeDBForDialog(existing_accounts=[("acc_exist_99", email)])
+    oauth = FakeOAuth()
+    oauth.respond_for(email, refresh_token=token)
+
+    dialog = ImportDialog(keyring=keyring, oauth=oauth, db=db, password="enc_pass_123")
+    qtbot.addWidget(dialog)
+
+    # Tunggu validasi & fetch kuota selesai
+    qtbot.waitUntil(lambda: dialog.cached_quota is not None, timeout=3000)
+
+    # Pilih Perbarui Token
+    dialog.radio_update.click()
+    dialog.btn_save.click()
+
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    # DB insert tidak dipanggil
+    assert len(db.inserted_or_updated) == 0
+    # update_refresh_token dipanggil dengan ID akun lama
+    assert len(db.updated_tokens) == 1
+    assert db.updated_tokens[0]["account_id"] == "acc_exist_99"
+    assert db.updated_tokens[0]["new_token"] == token
+    assert db.updated_tokens[0]["password"] == "enc_pass_123"
+
+    # update_account_quotas dipanggil
+    assert len(db.updated_quotas) == 1
+    assert db.updated_quotas[0]["account_id"] == "acc_exist_99"
+    assert db.updated_quotas[0]["quota_data"] == fake_quota
+
+
+def test_duplicate_email_add_as_new_entry_action(qtbot):
+    """Email duplikat + pilih Tambah Baru: panggil insert_or_update_json dengan ID baru."""
+    keyring = FakeKeyring()
+    email = "dup.new@example.com"
+    token = "1//rt_new_entry_token"
+
+    keyring.write(
+        KEYRING_SERVICE,
+        KEYRING_USERNAME,
+        json.dumps({
+            "refresh_token": token,
+            "id_token": make_id_token(email),
+        }).encode("utf-8"),
+    )
+
+    db = FakeDBForDialog(existing_accounts=[("acc_old_77", email)])
+    oauth = FakeOAuth()
+    oauth.respond_for(email, refresh_token=token)
+
+    dialog = ImportDialog(keyring=keyring, oauth=oauth, db=db)
+    qtbot.addWidget(dialog)
+
+    # Pilih Tambah sebagai Entri Baru
+    dialog.radio_new_entry.click()
+    dialog.btn_save.click()
+
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert len(db.updated_tokens) == 0
+    assert len(db.inserted_or_updated) == 1
+
+    saved = db.inserted_or_updated[0]
+    data = json.loads(saved["json_str"])
+    acc = data["accounts"][0]
+    assert acc["id"] != "acc_old_77"
+    assert acc["email"] == email
+
+
+def test_save_with_invalid_token_still_allowed(qtbot):
+    """Token tidak valid (invalid_grant) tetap boleh disimpan oleh pengguna."""
+    keyring = FakeKeyring()
+    email = "invalid.token@example.com"
+    token = "1//rt_revoked_still_save"
+
+    keyring.write(
+        KEYRING_SERVICE,
+        KEYRING_USERNAME,
+        json.dumps({
+            "refresh_token": token,
+            "id_token": make_id_token(email),
+        }).encode("utf-8"),
+    )
+
+    db = FakeDBForDialog()
+    oauth = FakeOAuth()
+    oauth.fail_with("invalid_grant")
+
+    dialog = ImportDialog(keyring=keyring, oauth=oauth, db=db)
+    qtbot.addWidget(dialog)
+
+    qtbot.waitUntil(lambda: "❌" in dialog.token_status_badge.text(), timeout=3000)
+
+    # Klik Simpan
+    dialog.btn_save.click()
+
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert len(db.inserted_or_updated) == 1
+    saved = db.inserted_or_updated[0]
+    data = json.loads(saved["json_str"])
+    assert data["accounts"][0]["refreshToken"] == token
+
+
+def test_save_when_quota_failed_still_succeeds(qtbot, monkeypatch):
+    """Kuota gagal fetch: akun tetap tersimpan tanpa kolom kuota."""
+    import src.ui.components.import_dialog as dialog_mod
+
+    keyring = FakeKeyring()
+    email = "no.quota@example.com"
+    token = "1//rt_no_quota"
+
+    keyring.write(
+        KEYRING_SERVICE,
+        KEYRING_USERNAME,
+        json.dumps({
+            "refresh_token": token,
+            "id_token": make_id_token(email),
+        }).encode("utf-8"),
+    )
+
+    monkeypatch.setattr(dialog_mod, "fetch_account_quota", lambda rt, project_id="aicode-consumers": (_ for _ in ()).throw(TimeoutError("Timeout")))
+
+    db = FakeDBForDialog()
+    oauth = FakeOAuth()
+    oauth.respond_for(email, refresh_token=token)
+
+    dialog = ImportDialog(keyring=keyring, oauth=oauth, db=db)
+    qtbot.addWidget(dialog)
+
+    qtbot.waitUntil(lambda: dialog.lbl_quota_status.text() == "Kuota tidak berhasil diambil", timeout=3000)
+
+    dialog.btn_save.click()
+
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert len(db.inserted_or_updated) == 1
+    data = json.loads(db.inserted_or_updated[0]["json_str"])
+    assert "cachedQuota" not in data["accounts"][0]
+
 
 
