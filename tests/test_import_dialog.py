@@ -79,9 +79,14 @@ def test_dialog_opens_with_keyring_data(qtbot):
 
     db = FakeDBForDialog(categories=["Alpha", "Beta"])
     oauth = FakeOAuth()
+    oauth.respond_for(email, refresh_token=refresh_token)
 
     dialog = ImportDialog(keyring=keyring, oauth=oauth, db=db, password="dummy_pass")
     qtbot.addWidget(dialog)
+
+    # Tunggu validasi selesai
+    if dialog._validation_worker:
+        qtbot.waitUntil(lambda: "Valid" in dialog.token_status_badge.text(), timeout=2000)
 
     assert dialog.import_data is not None
     assert dialog.email_input.text() == email
@@ -240,3 +245,134 @@ def test_menu_action_disabled_when_cli_unavailable(qtbot, monkeypatch):
     win._update_import_action_state()
     assert win.import_action.isEnabled() is False
     assert win.import_action.toolTip() == REASON_MESSAGES["unsupported_os"]
+
+
+# ─── Tests Tiket 03: Validasi Token Async ────────────────────────────────────
+
+
+def test_token_validation_success_shows_valid_badge(qtbot):
+    """Token valid menghasilkan badge ✅ Token Valid."""
+    keyring = FakeKeyring()
+    email = "valid.user@example.com"
+    token = "1//rt_valid_test_token"
+
+    keyring.write(
+        KEYRING_SERVICE,
+        KEYRING_USERNAME,
+        json.dumps({
+            "refresh_token": token,
+            "id_token": make_id_token(email),
+        }).encode("utf-8"),
+    )
+
+    db = FakeDBForDialog()
+    oauth = FakeOAuth()
+    oauth.respond_for(email, refresh_token=token)
+
+    dialog = ImportDialog(keyring=keyring, oauth=oauth, db=db)
+    qtbot.addWidget(dialog)
+
+    # Validasi berjalan segera setelah dialog dibuka
+    assert dialog._validation_worker is not None
+    qtbot.waitUntil(lambda: dialog.token_status_badge.text() == "✅ Token Valid", timeout=3000)
+
+    # Tombol Simpan tidak diblokir
+    assert dialog.btn_save.isEnabled() is True
+
+
+def test_token_validation_oauth_error_shows_invalid_badge(qtbot):
+    """Token tidak valid (mis. invalid_grant) menampilkan badge ❌ dengan error_code."""
+    keyring = FakeKeyring()
+    token = "1//rt_revoked_token"
+
+    keyring.write(
+        KEYRING_SERVICE,
+        KEYRING_USERNAME,
+        json.dumps({
+            "refresh_token": token,
+            "id_token": make_id_token("user@example.com"),
+        }).encode("utf-8"),
+    )
+
+    db = FakeDBForDialog()
+    oauth = FakeOAuth()
+    oauth.fail_with("invalid_grant", "Token has been expired or revoked.")
+
+    dialog = ImportDialog(keyring=keyring, oauth=oauth, db=db)
+    qtbot.addWidget(dialog)
+
+    qtbot.waitUntil(
+        lambda: "❌ Token Tidak Valid: invalid_grant" in dialog.token_status_badge.text(),
+        timeout=3000,
+    )
+
+    # Nilai token tidak boleh bocor ke badge
+    assert token not in dialog.token_status_badge.text()
+    # Pengguna tetap bisa mengedit dan menyimpan
+    assert dialog.btn_save.isEnabled() is True
+
+
+def test_token_validation_connection_failure_shows_warning_badge(qtbot):
+    """Kegagalan koneksi/timeout menampilkan badge ⚠️ oranye."""
+    keyring = FakeKeyring()
+    token = "1//rt_timeout_token"
+
+    keyring.write(
+        KEYRING_SERVICE,
+        KEYRING_USERNAME,
+        json.dumps({
+            "refresh_token": token,
+            "id_token": make_id_token("user@example.com"),
+        }).encode("utf-8"),
+    )
+
+    class TimeoutOAuth:
+        def exchange_refresh_token(self, rt):
+            raise TimeoutError("Connection timed out")
+
+    db = FakeDBForDialog()
+    oauth = TimeoutOAuth()
+
+    dialog = ImportDialog(keyring=keyring, oauth=oauth, db=db)
+    qtbot.addWidget(dialog)
+
+    qtbot.waitUntil(
+        lambda: "⚠️ Validasi gagal (timeout/jaringan)" in dialog.token_status_badge.text(),
+        timeout=3000,
+    )
+    assert dialog.btn_save.isEnabled() is True
+
+
+def test_token_rotation_updates_refresh_token_field(qtbot):
+    """Jika respons OAuth mengembalikan refresh_token baru (rotasi token), form diperbarui otomatis."""
+    keyring = FakeKeyring()
+    old_token = "1//old_refresh_token"
+    new_token = "1//new_rotated_refresh_token_xyz"
+    email = "rotated.user@example.com"
+
+    keyring.write(
+        KEYRING_SERVICE,
+        KEYRING_USERNAME,
+        json.dumps({
+            "refresh_token": old_token,
+            "id_token": make_id_token(email),
+        }).encode("utf-8"),
+    )
+
+    db = FakeDBForDialog()
+    oauth = FakeOAuth()
+    # Respons OAuth mengembalikan refresh_token baru
+    oauth.respond_for(email, refresh_token=new_token)
+
+    dialog = ImportDialog(keyring=keyring, oauth=oauth, db=db)
+    qtbot.addWidget(dialog)
+
+    # Sebelum validasi selesai, token adalah old_token
+    assert dialog.token_input.text() == old_token
+
+    # Tunggu validasi selesai
+    qtbot.waitUntil(lambda: dialog.token_status_badge.text() == "✅ Token Valid", timeout=3000)
+
+    # Field refresh token di form harus telah terupdate otomatis dengan new_token
+    assert dialog.token_input.text() == new_token
+
