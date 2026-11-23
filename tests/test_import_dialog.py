@@ -376,3 +376,150 @@ def test_token_rotation_updates_refresh_token_field(qtbot):
     # Field refresh token di form harus telah terupdate otomatis dengan new_token
     assert dialog.token_input.text() == new_token
 
+
+# ─── Tests Tiket 04: Fetch Kuota Async ───────────────────────────────────────
+
+
+def test_quota_fetch_success_populates_quota_labels(qtbot, monkeypatch):
+    """Setelah validasi token berhasil, kuota diambil di background dan ditampilkan di form."""
+    import src.ui.components.import_dialog as dialog_mod
+
+    keyring = FakeKeyring()
+    email = "quota.user@example.com"
+    token = "1//rt_quota_test"
+
+    keyring.write(
+        KEYRING_SERVICE,
+        KEYRING_USERNAME,
+        json.dumps({
+            "refresh_token": token,
+            "id_token": make_id_token(email),
+        }).encode("utf-8"),
+    )
+
+    fake_quota_data = {
+        "gemini-flash": {
+            "remainingFraction": 0.85,
+            "resetTime": "2026-11-24T12:00:00Z",
+            "modelCount": 11,
+        },
+        "claude": {
+            "remainingFraction": 0.50,
+            "resetTime": "2026-11-24T12:00:00Z",
+            "modelCount": 2,
+        },
+    }
+
+    def mock_fetch_quota(refresh_token, project_id="aicode-consumers"):
+        return fake_quota_data
+
+    monkeypatch.setattr(dialog_mod, "fetch_account_quota", mock_fetch_quota)
+
+    db = FakeDBForDialog()
+    oauth = FakeOAuth()
+    oauth.respond_for(email, refresh_token=token)
+
+    dialog = ImportDialog(keyring=keyring, oauth=oauth, db=db)
+    qtbot.addWidget(dialog)
+
+    # Tunggu validasi selesai
+    qtbot.waitUntil(lambda: dialog.token_status_badge.text() == "✅ Token Valid", timeout=3000)
+
+    # Kuota worker harus berjalan setelah token valid
+    assert dialog._quota_worker is not None
+    qtbot.waitUntil(lambda: dialog.cached_quota is not None, timeout=3000)
+
+    # Verifikasi kuota Gemini terisi (persentase 85%)
+    assert "85%" in dialog.lbl_quota_gemini.text()
+    # Verifikasi kuota Claude terisi (persentase 50%)
+    assert "50%" in dialog.lbl_quota_claude.text()
+    # Note status kuota kosong setelah sukses
+    assert dialog.lbl_quota_status.text() == ""
+    # Tombol simpan tetap aktif
+    assert dialog.btn_save.isEnabled() is True
+
+
+def test_quota_fetch_skipped_when_token_invalid(qtbot, monkeypatch):
+    """Jika validasi token gagal, fetch kuota dilewati dan kolom kuota tetap kosong."""
+    import src.ui.components.import_dialog as dialog_mod
+
+    keyring = FakeKeyring()
+    token = "1//rt_invalid_for_quota"
+
+    keyring.write(
+        KEYRING_SERVICE,
+        KEYRING_USERNAME,
+        json.dumps({
+            "refresh_token": token,
+            "id_token": make_id_token("user@example.com"),
+        }).encode("utf-8"),
+    )
+
+    fetch_called = []
+
+    def mock_fetch_quota(refresh_token, project_id="aicode-consumers"):
+        fetch_called.append(refresh_token)
+        return {}
+
+    monkeypatch.setattr(dialog_mod, "fetch_account_quota", mock_fetch_quota)
+
+    db = FakeDBForDialog()
+    oauth = FakeOAuth()
+    oauth.fail_with("invalid_grant")
+
+    dialog = ImportDialog(keyring=keyring, oauth=oauth, db=db)
+    qtbot.addWidget(dialog)
+
+    qtbot.waitUntil(lambda: "❌" in dialog.token_status_badge.text(), timeout=3000)
+
+    # Fetch kuota tidak pernah dipanggil
+    assert len(fetch_called) == 0
+    assert dialog._quota_worker is None
+    assert dialog.lbl_quota_gemini.text() == "-"
+    assert dialog.lbl_quota_claude.text() == "-"
+    assert dialog.btn_save.isEnabled() is True
+
+
+def test_quota_fetch_failure_shows_note_and_keeps_save_enabled(qtbot, monkeypatch):
+    """Jika fetch kuota gagal (error jaringan/API), tampilkan note kecil dan Simpan tetap aktif."""
+    import src.ui.components.import_dialog as dialog_mod
+
+    keyring = FakeKeyring()
+    email = "quota.fail@example.com"
+    token = "1//rt_quota_fail"
+
+    keyring.write(
+        KEYRING_SERVICE,
+        KEYRING_USERNAME,
+        json.dumps({
+            "refresh_token": token,
+            "id_token": make_id_token(email),
+        }).encode("utf-8"),
+    )
+
+    def mock_fetch_quota_fail(refresh_token, project_id="aicode-consumers"):
+        raise TimeoutError("API Gateway Timeout")
+
+    monkeypatch.setattr(dialog_mod, "fetch_account_quota", mock_fetch_quota_fail)
+
+    db = FakeDBForDialog()
+    oauth = FakeOAuth()
+    oauth.respond_for(email, refresh_token=token)
+
+    dialog = ImportDialog(keyring=keyring, oauth=oauth, db=db)
+    qtbot.addWidget(dialog)
+
+    # Tunggu validasi selesai dan fetch kuota gagal
+    qtbot.waitUntil(lambda: dialog.token_status_badge.text() == "✅ Token Valid", timeout=3000)
+    qtbot.waitUntil(
+        lambda: dialog.lbl_quota_status.text() == "Kuota tidak berhasil diambil",
+        timeout=3000,
+    )
+
+    assert dialog.cached_quota is None
+    assert dialog.lbl_quota_gemini.text() == "-"
+    assert dialog.lbl_quota_claude.text() == "-"
+    # Tombol simpan tidak terpengaruh
+    assert dialog.btn_save.isEnabled() is True
+
+

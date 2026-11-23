@@ -33,8 +33,10 @@ from src.integrations.antigravity.errors import (
 )
 from src.integrations.antigravity.keyring_reader import KeyringImportData, KeyringReader
 from src.integrations.antigravity.ports import KeyringPort, OAuthPort
+from src.integrations.antigravity.quota_service import fetch_account_quota
 from src.ui.components.loading_dialog import WorkerThread
 from src.ui.components.secure_line_edit import SecureLineEdit
+from src.ui.utils import parse_quota_info
 
 logger = logging.getLogger(__name__)
 
@@ -79,9 +81,11 @@ class ImportDialog(QDialog):
 
         self.import_data: Optional[KeyringImportData] = None
         self._validation_worker: Optional[WorkerThread] = None
+        self._quota_worker: Optional[WorkerThread] = None
+        self.cached_quota: Optional[dict] = None
 
         self.setWindowTitle("Import dari Antigravity CLI")
-        self.resize(500, 360)
+        self.resize(520, 440)
         self.setModal(True)
 
         # Coba baca keyring terlebih dahulu
@@ -186,6 +190,17 @@ class ImportDialog(QDialog):
         self._populate_categories()
         form_layout.addRow("Kategori:", self.category_combo)
 
+        # 6. Bagian Kuota (Read-Only)
+        self.lbl_quota_gemini = QLabel("-")
+        form_layout.addRow("Kuota Gemini:", self.lbl_quota_gemini)
+
+        self.lbl_quota_claude = QLabel("-")
+        form_layout.addRow("Kuota Claude:", self.lbl_quota_claude)
+
+        self.lbl_quota_status = QLabel("")
+        self.lbl_quota_status.setStyleSheet("color: #5f6368; font-size: 11px; font-style: italic;")
+        form_layout.addRow("", self.lbl_quota_status)
+
         main_layout.addLayout(form_layout)
 
         # Spacer / info
@@ -257,6 +272,56 @@ class ImportDialog(QDialog):
             new_email = getattr(response, "email", None)
             if new_email and isinstance(new_email, str):
                 self.email_input.setText(new_email)
+
+        # Token valid: mulai fetch kuota di background
+        self._start_quota_fetch()
+
+    def _start_quota_fetch(self) -> None:
+        """Fetch kuota akun dari API secara async di background."""
+        token = self.token_input.text().strip()
+        if not token:
+            return
+
+        project_id = self.project_id_input.text().strip() or "aicode-consumers"
+
+        self.lbl_quota_status.setText("Mengambil kuota…")
+        self.lbl_quota_status.setStyleSheet("color: #5f6368; font-size: 11px; font-style: italic;")
+
+        def task():
+            return fetch_account_quota(token, project_id=project_id)
+
+        self._quota_worker = WorkerThread(task)
+        self._quota_worker.success.connect(self._on_quota_success)
+        self._quota_worker.failed.connect(self._on_quota_failed)
+        self._quota_worker.start()
+
+    def _on_quota_success(self, quota_data: dict) -> None:
+        """Dipanggil saat fetch kuota berhasil."""
+        self.cached_quota = quota_data
+        self.lbl_quota_status.setText("")
+
+        # Format tampilan kuota Gemini
+        gemini_item = quota_data.get("gemini-flash") or quota_data.get("gemini-pro") or {}
+        g_frac = gemini_item.get("remainingFraction")
+        g_reset = gemini_item.get("resetTime")
+        g_text, _, _, _, _ = parse_quota_info(g_frac, g_reset)
+        self.lbl_quota_gemini.setText(g_text)
+
+        # Format tampilan kuota Claude
+        claude_item = quota_data.get("claude", {})
+        c_frac = claude_item.get("remainingFraction")
+        c_reset = claude_item.get("resetTime")
+        c_text, _, _, _, _ = parse_quota_info(c_frac, c_reset)
+        self.lbl_quota_claude.setText(c_text)
+
+    def _on_quota_failed(self, error: Exception) -> None:
+        """Dipanggil saat fetch kuota gagal."""
+        logger.debug("Fetch kuota gagal: %s", error)
+        self.cached_quota = None
+        self.lbl_quota_gemini.setText("-")
+        self.lbl_quota_claude.setText("-")
+        self.lbl_quota_status.setText("Kuota tidak berhasil diambil")
+        self.lbl_quota_status.setStyleSheet("color: #b06000; font-size: 11px; font-style: italic;")
 
     def _on_validation_failed(self, error: Exception) -> None:
         """Dipanggil saat exchange refresh token gagal."""
