@@ -16,7 +16,13 @@ from PyQt6.QtWidgets import (
 )
 
 from src.database import AccountDatabase
-from src.integrations.antigravity.factory import create_facade
+from src.integrations.antigravity.factory import (
+    check_cli_availability,
+    create_facade,
+    ProductionKeyringPort,
+    ProductionOAuthPort,
+    NullKeyringPort,
+)
 from src.targets import create_settings
 from src.turso_client import TursoClient
 from src.ui.components import (
@@ -24,11 +30,21 @@ from src.ui.components import (
     AccountTableWidget,
     CategoryManagementDialog,
     ConfigBarWidget,
+    ImportDialog,
     JsonInputWidget,
     LoadingDialog,
     SettingsDialog,
     WorkerThread,
 )
+
+# Pemetaan kode alasan ketidaktersediaan Antigravity CLI ke pesan tooltip manusia
+REASON_MESSAGES = {
+    "unsupported_os": "Hanya didukung di OS Linux",
+    "no_dbus": "D-Bus / Secret Service tidak tersedia",
+    "keyring_locked": "Keyring terkunci — buka keyring lalu coba lagi",
+    "root": "Aplikasi dijalankan sebagai root (tidak aman)",
+    "dbus_error": "Terjadi kesalahan saat menghubungi D-Bus",
+}
 
 
 class MainWindow(QMainWindow):
@@ -92,6 +108,16 @@ class MainWindow(QMainWindow):
   def _init_menu_bar(self):
     menu_bar = self.menuBar()
 
+    # ─── Menu File ───
+    file_menu = menu_bar.addMenu("&File")
+    self.import_action = QAction("&Import dari Antigravity…", self)
+    self.import_action.setShortcut(QKeySequence("Ctrl+Shift+I"))
+    self.import_action.setStatusTip("Import akun aktif dari Antigravity CLI (Keyring)")
+    self.import_action.triggered.connect(self.open_import_dialog)
+    file_menu.addAction(self.import_action)
+    file_menu.aboutToShow.connect(self._update_import_action_state)
+    self._update_import_action_state()
+
     category_menu = menu_bar.addMenu("&Kategori")
     manage_cat_action = QAction("&Kelola Kategori...", self)
     manage_cat_action.setShortcut(QKeySequence("Ctrl+M"))
@@ -122,6 +148,42 @@ class MainWindow(QMainWindow):
     about_action.triggered.connect(self.open_about_dialog)
 
     help_menu.addAction(about_action)
+
+  def _update_import_action_state(self):
+    """Perbarui status aktif/nonaktif dan tooltip aksi Import dari Antigravity."""
+    available, reason = check_cli_availability()
+    self.import_action.setEnabled(available)
+    if not available:
+      self.import_action.setToolTip(REASON_MESSAGES.get(reason, "Tidak tersedia"))
+    else:
+      self.import_action.setToolTip("Import akun aktif dari Antigravity CLI (Keyring)")
+
+  def _get_keyring_port(self):
+    """Mengembalikan port keyring yang sesuai untuk platform saat ini."""
+    if hasattr(self, "_override_keyring_port") and self._override_keyring_port is not None:
+      return self._override_keyring_port
+    from src.integrations.antigravity.factory import ProductionEnvironmentPort
+    env = ProductionEnvironmentPort()
+    return ProductionKeyringPort() if env.is_linux() else NullKeyringPort()
+
+  def _get_oauth_port(self):
+    """Mengembalikan port oauth untuk validasi/pertukaran token."""
+    if hasattr(self, "_override_oauth_port") and self._override_oauth_port is not None:
+      return self._override_oauth_port
+    return ProductionOAuthPort()
+
+  def open_import_dialog(self):
+    """Buka dialog Import dari Antigravity."""
+    password = self.settings.value("encryption_password", "") or self._get_encryption_password()
+    dialog = ImportDialog(
+        keyring=self._get_keyring_port(),
+        oauth=self._get_oauth_port(),
+        db=self.db,
+        password=password,
+        parent=self,
+    )
+    if dialog.exec() == QDialog.DialogCode.Accepted:
+      self.reload_accounts()
 
   def open_about_dialog(self):
     dialog = AboutDialog(self)

@@ -7,6 +7,7 @@ from .loading_dialog import LoadingDialog, WorkerThread
 from .secure_line_edit import SecureLineEdit
 from .about_dialog import AboutDialog
 from .category_dialog import CategoryManagementDialog
+from .import_dialog import ImportDialog
 
 __all__ = [
     "ConfigBarWidget",
@@ -19,4 +20,5 @@ __all__ = [
     "SecureLineEdit",
     "AboutDialog",
     "CategoryManagementDialog",
+    "ImportDialog",
 ]
